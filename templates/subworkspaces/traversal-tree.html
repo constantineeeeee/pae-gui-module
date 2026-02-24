@@ -1,0 +1,80 @@
+<template>
+  <div class="subworkspace tab-area traversal-tree-subworkspace">
+    <main class="tt-main">
+      <header
+        style="
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 12px 16px;
+          border-bottom: 1px solid var(--brd, #30363d);
+        "
+      >
+        <div>
+          <h1 style="margin: 0; font-size: 18px">Traversal Tree</h1>
+          <div
+            class="tt-meta"
+            style="opacity: 0.8; font-size: 12px; margin-top: 4px"
+          >
+            <span data-tt-meta="summary">—</span>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 8px; align-items: center">
+          <button data-tt-action="rerun">Re-run</button>
+          <button data-tt-action="close">Close</button>
+        </div>
+      </header>
+      <main style="height: calc(100% - 58px)">
+        <section class="drawing" style="height: 100%; overflow: auto;">
+          <svg data-tt-svg style="min-width: 100%; min-height: 100%; display: block;"></svg>
+        </section>
+      </main>
+
+    <aside
+      class="right-panels"
+      style="border-left: 1px solid var(--brd, #30363d)"
+    >
+      <section class="tab-buttons">
+        <div class="tab-button" data-tab-id="result">Result</div>
+      </section>
+      <main class="panel-tabs">
+        <div class="tt-results">
+
+          <div class="tt-results-block">
+            <h4>Parallel Branches</h4>
+            <div data-tt-parallel></div>
+          </div>
+
+          <div class="tt-results-block">
+            <!-- <h4>Non-parallel Branches</h4> -->
+            <div data-tt-nonparallel></div>
+          </div>
+        </div>
+
+        <div
+          class="tab-area panel"
+          data-tab-id="result"
+          data-panel-id="result"
+          style="padding: 12px"
+        >
+          <h2 style="margin: 0 0 10px 0; font-size: 14px">Details</h2>
+
+          <div style="display: grid; gap: 8px; font-size: 12px">
+            <div><b>Source:</b> <span data-tt-meta="source">—</span></div>
+            <div><b>Sink:</b> <span data-tt-meta="sink">—</span></div>
+            <div><b>Nodes:</b> <span data-tt-meta="nodes">—</span></div>
+            <div><b>Times:</b> <span data-tt-meta="times">—</span></div>
+          </div>
+
+          <hr style="margin: 12px 0; opacity: 0.3" />
+
+          <div style="font-size: 12px; opacity: 0.9">
+            Tip: nodes are layered by <b>time</b>. Labels show <b>vertex</b> and
+            the last token in <b>S</b>.
+          </div>
+        </div>
+      </main>
+    </aside>
+  </div>
+</template>
