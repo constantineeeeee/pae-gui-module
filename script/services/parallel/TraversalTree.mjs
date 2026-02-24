@@ -61,7 +61,8 @@ function cartesian(arrays) {
 function mergeHistories(histories) {
   if (!histories.length) return [];
   let i = 0;
-  while (histories.every((h) => h[i] !== undefined && h[i] === histories[0][i])) i++;
+  while (histories.every((h) => h[i] !== undefined && h[i] === histories[0][i]))
+    i++;
 
   const merged = [...histories[0].slice(0, i)];
   histories.forEach((h) => {
@@ -73,49 +74,6 @@ function mergeHistories(histories) {
 }
 
 // ==========================================
-// Tarjan's Algorithm for Cycles
-// ==========================================
-function computeSCCs(vertices, out) {
-  const indexMap = new Map(), lowlink = new Map(), onStack = new Set(), stack = [];
-  let index = 0;
-  const sccIdOf = new Map();
-  const sccs = [];
-
-  function strongconnect(v) {
-    indexMap.set(v, index); lowlink.set(v, index); index++;
-    stack.push(v); onStack.add(v);
-
-    for (const e of (out.get(v) || [])) {
-      const w = e.to;
-      if (!indexMap.has(w)) {
-        strongconnect(w);
-        lowlink.set(v, Math.min(lowlink.get(v), lowlink.get(w)));
-      } else if (onStack.has(w)) {
-        lowlink.set(v, Math.min(lowlink.get(v), indexMap.get(w)));
-      }
-    }
-
-    if (lowlink.get(v) === indexMap.get(v)) {
-      const comp = [];
-      let w;
-      do {
-        w = stack.pop();
-        onStack.delete(w);
-        comp.push(w);
-      } while (w !== v);
-      const sccId = sccs.length;
-      for (const u of comp) sccIdOf.set(u, sccId);
-      sccs.push(comp);
-    }
-  }
-
-  for (const v of vertices) {
-    if (!indexMap.has(v.id)) strongconnect(v.id);
-  }
-  return { sccIdOf, sccs };
-}
-
-// ==========================================
 // Main Generator
 // ==========================================
 
@@ -123,7 +81,8 @@ export function generateTraversalTreeFromJSON(input, { sourceId = null } = {}) {
   parseRDLT(input, false);
   const { vertices, edges } = input;
 
-  const out = new Map(), inc = new Map();
+  const out = new Map(),
+    inc = new Map();
   edges.forEach((e, idx) => {
     const edge = { ...e, __idx: idx };
     if (!out.has(e.from)) out.set(e.from, []);
@@ -132,55 +91,39 @@ export function generateTraversalTreeFromJSON(input, { sourceId = null } = {}) {
     inc.get(e.to).push(edge);
   });
 
-  // Identify Cycles and Critical Arcs (Arcs dictating L)
-  const { sccIdOf, sccs } = computeSCCs(vertices, out);
-  const cycleSCCs = new Set();
-  const criticalArcsByScc = new Map();
-
-  for (let i = 0; i < sccs.length; i++) {
-    const comp = sccs[i];
-    let isCycle = comp.length > 1;
-    if (!isCycle) {
-      const outs = out.get(comp[0]) || [];
-      isCycle = outs.some(e => e.to === comp[0]);
-    }
-    
-    if (isCycle) {
-      cycleSCCs.add(i);
-      let minL = Infinity;
-      let cArcs = [];
-      for (const vId of comp) {
-        for (const e of (out.get(vId) || [])) {
-          if (sccIdOf.get(e.to) === i) {
-            const L = getL(e);
-            if (L < minL) { minL = L; cArcs = [e]; }
-            else if (L === minL) cArcs.push(e);
-          }
-        }
-      }
-      criticalArcsByScc.set(i, cArcs);
-    }
-  }
-
   const src = sourceId ?? vertices.find((v) => !inc.has(v.id))?.id;
   const nodeIndex = new Map();
   const allNodes = [];
+
   const joinBuffer = new Map();
   const mixBuffer = new Map();
+
   let idCounter = 1;
 
   function getOrCreateNode(v, S, time, reality, T) {
     const key = `${v}|${time}|${S.join(",")}|${JSON.stringify(reality)}`;
     if (nodeIndex.has(key)) return nodeIndex.get(key);
 
-    const node = { id: idCounter++, v, S, time, reality, T, parents: [], children: [], processed: false };
+    const node = {
+      id: idCounter++,
+      v,
+      S,
+      time,
+      reality,
+      T,
+      parents: [],
+      children: [],
+      processed: false,
+    };
     nodeIndex.set(key, node);
     allNodes.push(node);
     return node;
   }
 
-  const initialT = new Map(edges.map((e, i) => [edgeKey(e, i), Array(getL(e)).fill(0)]));
-  getOrCreateNode(src, [0], 0, {}, initialT); // Root starts at t=0
+  const initialT = new Map(
+    edges.map((e, i) => [edgeKey(e, i), Array(getL(e)).fill(0)]),
+  );
+  getOrCreateNode(src, [0], 0, {}, initialT);
 
   while (true) {
     const current = allNodes.filter((n) => !n.processed);
@@ -190,66 +133,72 @@ export function generateTraversalTreeFromJSON(input, { sourceId = null } = {}) {
       node.processed = true;
       const outs = out.get(node.v) ?? [];
 
-      // --- CYCLE ROUTING LOGIC ---
-      const xScc = sccIdOf.get(node.v);
-      const inCycle = xScc != null && cycleSCCs.has(xScc);
-      let allowedOuts = outs;
-
-      if (inCycle) {
-        const cArcs = criticalArcsByScc.get(xScc);
-        // A cycle is exhausted if ANY of its critical arcs have no 0s left in T
-        const cycleExhausted = cArcs.some(e => {
-          const vec = node.T.get(edgeKey(e, e.__idx));
-          return !vec || vec.indexOf(0) === -1;
-        });
-
-        const cycleEdges = outs.filter((e) => sccIdOf.get(e.to) === xScc);
-        const nonCycleEdges = outs.filter((e) => sccIdOf.get(e.to) !== xScc);
-
-        if (!cycleExhausted) {
-          allowedOuts = cycleEdges; // Stay in the cycle
-        } else {
-          allowedOuts = nonCycleEdges.length > 0 ? nonCycleEdges : cycleEdges; // Break out
-        }
-      }
-
-      for (const e of allowedOuts) {
+      for (const e of outs) {
         if (!isUnconstrained(e, inc, node.T)) continue;
 
         const vec = node.T.get(edgeKey(e, e.__idx));
         const slot = vec?.indexOf(0);
-        if (slot === -1 || slot === undefined) continue; // Skip if capacity is fully utilized
+        if (slot === -1 || slot === undefined) continue;
 
         const y = e.to;
         const C = e.C ?? EPS;
         const incoming = inc.get(y) ?? [];
 
         const isJoin = incoming.length > 1;
-        const isAllEpsilon = isJoin && incoming.every((a) => (a.C ?? EPS) === EPS);
+        const isAllEpsilon =
+          isJoin && incoming.every((a) => (a.C ?? EPS) === EPS);
 
         const incomingToX = inc.get(node.v) ?? [];
-        const timeAssigned = Math.max(0, ...incomingToX.flatMap((ie) => node.T.get(edgeKey(ie, ie.__idx)) ?? [])) + 1;
+        const timeAssigned =
+          Math.max(
+            0,
+            ...incomingToX.flatMap(
+              (ie) => node.T.get(edgeKey(ie, ie.__idx)) ?? [],
+            ),
+          ) + 1;
 
         const nextT = new Map(Array.from(node.T).map(([k, v]) => [k, [...v]]));
-        nextT.get(edgeKey(e, e.__idx))[slot] = timeAssigned; // Consume 1 instance of L
+        nextT.get(edgeKey(e, e.__idx))[slot] = timeAssigned;
 
         if (!isJoin || isAllEpsilon) {
-          const child = getOrCreateNode(y, [...node.S, C], timeAssigned, node.reality, nextT);
+          const child = getOrCreateNode(
+            y,
+            [...node.S, C],
+            timeAssigned,
+            node.reality,
+            nextT,
+          );
           link(node, child);
         } else {
-          const isMix = incoming.some((a) => (a.C ?? EPS) === EPS) && incoming.some((a) => (a.C ?? EPS) !== EPS);
+          const isMix =
+            incoming.some((a) => (a.C ?? EPS) === EPS) &&
+            incoming.some((a) => (a.C ?? EPS) !== EPS);
 
           if (isMix) {
             if (!mixBuffer.has(y)) mixBuffer.set(y, new Map());
-            if (!mixBuffer.get(y).has(slot)) mixBuffer.get(y).set(slot, { sigmas: [], epsilons: [] });
+            if (!mixBuffer.get(y).has(slot))
+              mixBuffer.get(y).set(slot, { sigmas: [], epsilons: [] });
 
             const b = mixBuffer.get(y).get(slot);
 
             if (C !== EPS) {
-              const s = { node, time: timeAssigned, C, S: [...node.S], reality: { ...node.reality, [y]: 1 }, nextT };
+              const s = {
+                node,
+                time: timeAssigned,
+                C,
+                S: [...node.S],
+                reality: { ...node.reality, [y]: 1 },
+                nextT,
+              };
               b.sigmas.push(s);
 
-              const zSigma = getOrCreateNode(y, [...node.S, C], timeAssigned, s.reality, nextT);
+              const zSigma = getOrCreateNode(
+                y,
+                [...node.S, C],
+                timeAssigned,
+                s.reality,
+                nextT,
+              );
               link(node, zSigma);
 
               for (const p of b.epsilons) {
@@ -257,12 +206,25 @@ export function generateTraversalTreeFromJSON(input, { sourceId = null } = {}) {
                 if (mergedR) {
                   const newR = { ...mergedR, [y]: 2 };
                   const mergedT = mergeT([p.nextT, s.nextT]);
-                  const zEps = getOrCreateNode(y, [...p.S, `(${EPS},${C})`], Math.max(p.time, s.time), newR, mergedT);
+                  const zEps = getOrCreateNode(
+                    y,
+                    [...p.S, `(${EPS},${C})`],
+                    Math.max(p.time, s.time),
+                    newR,
+                    mergedT,
+                  );
                   link(p.node, zEps);
+                  link(node, zEps); // FIXED: Link the sigma branch to the joined node
                 }
               }
             } else {
-              const p = { node, time: timeAssigned, S: [...node.S], reality: node.reality, nextT };
+              const p = {
+                node,
+                time: timeAssigned,
+                S: [...node.S],
+                reality: node.reality,
+                nextT,
+              };
               b.epsilons.push(p);
 
               for (const s of b.sigmas) {
@@ -270,43 +232,79 @@ export function generateTraversalTreeFromJSON(input, { sourceId = null } = {}) {
                 if (mergedR) {
                   const newR = { ...mergedR, [y]: 2 };
                   const mergedT = mergeT([p.nextT, s.nextT]);
-                  const zEps = getOrCreateNode(y, [...p.S, `(${EPS},${s.C})`], Math.max(p.time, s.time), newR, mergedT);
+                  const zEps = getOrCreateNode(
+                    y,
+                    [...p.S, `(${EPS},${s.C})`],
+                    Math.max(p.time, s.time),
+                    newR,
+                    mergedT,
+                  );
                   link(p.node, zEps);
+                  link(s.node, zEps); // FIXED: Link the sigma branch to the joined node
                 }
               }
             }
           } else {
             // Standard AND Join
             if (!joinBuffer.has(y)) joinBuffer.set(y, new Map());
-            if (!joinBuffer.get(y).has(slot)) joinBuffer.get(y).set(slot, new Map());
+            if (!joinBuffer.get(y).has(slot))
+              joinBuffer.get(y).set(slot, new Map());
 
             const conditionBuffer = joinBuffer.get(y).get(slot);
             if (!conditionBuffer.has(C)) conditionBuffer.set(C, []);
 
-            conditionBuffer.get(C).push({ node, time: timeAssigned, C, S: [...node.S], reality: node.reality, nextT });
+            conditionBuffer
+              .get(C)
+              .push({
+                node,
+                time: timeAssigned,
+                C,
+                S: [...node.S],
+                reality: node.reality,
+                nextT,
+              });
 
-            const requiredConditions = Array.from(new Set(incoming.map((a) => a.C ?? EPS))).sort();
-            const hasAll = requiredConditions.every((cond) => conditionBuffer.has(cond) && conditionBuffer.get(cond).length > 0);
+            const requiredConditions = Array.from(
+              new Set(incoming.map((a) => a.C ?? EPS)),
+            ).sort();
+            const hasAll = requiredConditions.every(
+              (cond) =>
+                conditionBuffer.has(cond) &&
+                conditionBuffer.get(cond).length > 0,
+            );
 
             if (hasAll) {
-              const arrays = requiredConditions.map((cond) => conditionBuffer.get(cond));
+              const arrays = requiredConditions.map((cond) =>
+                conditionBuffer.get(cond),
+              );
               const combinations = cartesian(arrays);
 
               for (const combo of combinations) {
-                const mergedR = areRealitiesCompatible(combo.map((a) => a.reality));
+                const mergedR = areRealitiesCompatible(
+                  combo.map((a) => a.reality),
+                );
                 if (!mergedR) continue;
 
-                const sortedArcs = [...combo].sort((a, b) => b.time - a.time || b.C.localeCompare(a.C));
+                const sortedArcs = [...combo].sort(
+                  (a, b) => b.time - a.time || b.C.localeCompare(a.C),
+                );
                 const tMax = Math.max(...sortedArcs.map((a) => a.time));
 
-                const joinToken = requiredConditions.length > 1 
-                  ? `(${sortedArcs.map((a) => a.C).join(",")})` 
-                  : sortedArcs[0].C;
+                const joinToken =
+                  requiredConditions.length > 1
+                    ? `(${sortedArcs.map((a) => a.C).join(",")})`
+                    : sortedArcs[0].C;
 
                 const baseS = mergeHistories(sortedArcs.map((a) => a.S));
                 const mergedT = mergeT(combo.map((a) => a.nextT));
 
-                const resolved = getOrCreateNode(y, [...baseS, joinToken], tMax, mergedR, mergedT);
+                const resolved = getOrCreateNode(
+                  y,
+                  [...baseS, joinToken],
+                  tMax,
+                  mergedR,
+                  mergedT,
+                );
 
                 for (const arc of sortedArcs) {
                   link(arc.node, resolved);

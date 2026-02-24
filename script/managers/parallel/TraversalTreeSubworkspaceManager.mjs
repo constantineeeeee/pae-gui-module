@@ -5,9 +5,8 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 // Layout Constants
 const LEFT_PAD = 60;
 const TOP_PAD = 60;
-const FIRST_GAP = 450;
-const LATER_GAP = 260;
-const Y_GAP = 90;
+const X_GAP = 320; // Horizontal spacing between levels
+const Y_GAP = 90;  // Vertical spacing between leaves
 const BOX_PAD_X = 10;
 const BOX_PAD_Y = 8;
 
@@ -19,7 +18,6 @@ export default class TraversalTreeViewerManager {
   #subworkspace;
   #svg;
   #root;
-  
 
   constructor(context, visualModelSnapshot) {
     this.context = context;
@@ -89,102 +87,96 @@ export default class TraversalTreeViewerManager {
     const make = (tag) => document.createElementNS(SVG_NS, tag);
     const sToString = (S) => `S([${(S ?? []).join(",")}])`;
 
-    // ---------- 0. Use Pre-Calculated Time from Generator ----------
-    const nodeMap = new Map(res.allNodes.map((n) => [n.id, n]));
+    // ---------- 1. Compute Depths (Longest Path for X-Axis) ----------
+    const depthOf = new Map();
+    res.allNodes.forEach((n) => depthOf.set(n.id, 0));
 
-    // Calculate X coordinate based on the mathematical time instead of arc depth
-    const timeToX = (n) => {
-      const t = n.time; // Read direct property from the generator
-      
-      // 1. Root nodes
-      if (t === 0) return LEFT_PAD;
-      
-      // 2. Immediate children (t = 1)
-      if (t === 1) return LEFT_PAD + FIRST_GAP * 0.55;
-
-      // 3. Normal nodes at t >= 2
-      return LEFT_PAD + FIRST_GAP + (t - 2) * LATER_GAP;
-    };
-
-    // ---------- 1. Group nodes by Time ----------
-    const byTime = new Map();
-    for (const n of res.allNodes) {
-      const t = n.time;
-      if (!byTime.has(t)) byTime.set(t, []);
-      byTime.get(t).push(n);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const n of res.allNodes) {
+        const current = depthOf.get(n.id);
+        let maxParentDepth = -1;
+        for (const p of n.parents ?? []) {
+          const pDepth = depthOf.get(p.id);
+          if (pDepth > maxParentDepth) maxParentDepth = pDepth;
+        }
+        if (maxParentDepth + 1 > current) {
+          depthOf.set(n.id, maxParentDepth + 1);
+          changed = true;
+        }
+      }
     }
 
-    const times = [...byTime.keys()].sort((a, b) => a - b);
+    // ---------- 2. Build Spanning Tree to avoid DAG double-counting ----------
+    const childrenOf = new Map();
+    res.allNodes.forEach((n) => childrenOf.set(n.id, []));
 
-    // ---------- 2. Span-based Lane Assignment ----------
-    const laneIntervals = new Map();
-    const laneOf = new Map();
+    const sortedNodes = [...res.allNodes].sort(
+      (a, b) => depthOf.get(a.id) - depthOf.get(b.id)
+    );
 
-    const isFree = (lane, start, end) => {
-      const intervals = laneIntervals.get(lane) ?? [];
-      for (const [s, e] of intervals) {
-        if (start < e && end > s) return false; // Strict overlap check
-      }
-      return true;
-    };
-
-    const occupy = (lane, start, end) => {
-      if (!laneIntervals.has(lane)) laneIntervals.set(lane, []);
-      laneIntervals.get(lane).push([start, end]);
-    };
-
-    times.forEach((t) => {
-      const nodes = byTime.get(t) ?? [];
-
-      // Sort nodes to prioritize maintaining the parent's lane
-      nodes.sort((a, b) => {
-        const laneA = a.parents?.[0] ? (laneOf.get(a.parents[0].id) ?? 0) : 0;
-        const laneB = b.parents?.[0] ? (laneOf.get(b.parents[0].id) ?? 0) : 0;
-        if (laneA !== laneB) return laneA - laneB;
-        if (a.v !== b.v) return a.v.localeCompare(b.v);
-        return sToString(a.S).localeCompare(sToString(b.S));
-      });
-
-      for (const n of nodes) {
-        const parent = n.parents?.[0];
-        const preferred = parent ? (laneOf.get(parent.id) ?? 0) : 0;
-        const nTime = n.time;
-
-        let maxChildTime = nTime;
-        for (const c of n.children ?? []) {
-          const cTime = c.time;
-          if (cTime > maxChildTime) maxChildTime = cTime;
+    const parentOf = new Map();
+    for (const n of sortedNodes) {
+      for (const c of n.children ?? []) {
+        if (!parentOf.has(c.id)) {
+          parentOf.set(c.id, n.id);
+          childrenOf.get(n.id).push(c);
         }
-
-        // Reserve span up to furthest child (or a slight bump if no children to reserve the cell)
-        const start = nTime;
-        const end = maxChildTime > nTime ? maxChildTime : nTime + 0.5;
-
-        let assignedLane = -1;
-
-        if (isFree(preferred, start, end)) {
-          assignedLane = preferred;
-        } else {
-          for (let l = 0; l < 1000; l++) {
-            if (isFree(l, start, end)) {
-              assignedLane = l;
-              break;
-            }
-          }
-        }
-
-        laneOf.set(n.id, assignedLane);
-        occupy(assignedLane, start, end);
       }
-    });
+    }
 
-    // ---------- 3. SVG Group Layers ----------
+    // ---------- 3. Compute Subtree Widths (Leaf Counts) ----------
+    const leafCount = new Map();
+    function calcLeaves(node) {
+      const children = childrenOf.get(node.id);
+      if (children.length === 0) {
+        leafCount.set(node.id, 1);
+        return 1;
+      }
+      let sum = 0;
+      for (const c of children) sum += calcLeaves(c);
+      leafCount.set(node.id, sum);
+      return sum;
+    }
+
+    const roots = res.allNodes.filter((n) => !n.parents || n.parents.length === 0);
+    roots.forEach((r) => calcLeaves(r));
+
+    // ---------- 4. Assign Grid Positions recursively (Y-Axis) ----------
+    const layoutPos = new Map();
+
+    function assignPos(node, yStart) {
+      const depth = depthOf.get(node.id);
+      const x = LEFT_PAD + depth * X_GAP;
+      const myLeaves = leafCount.get(node.id);
+
+      // Center the node vertically in its allocated leaf-span
+      const myHeight = myLeaves * Y_GAP;
+      const y = yStart + myHeight / 2 - Y_GAP / 2;
+
+      layoutPos.set(node.id, { x, y });
+
+      let currY = yStart;
+      for (const c of childrenOf.get(node.id)) {
+        assignPos(c, currY);
+        currY += leafCount.get(c.id) * Y_GAP; // Shift down for next sibling
+      }
+    }
+
+    let currentRootY = TOP_PAD;
+    for (const r of roots) {
+      assignPos(r, currentRootY);
+      currentRootY += leafCount.get(r.id) * Y_GAP;
+    }
+
+    // ---------- 5. SVG Group Layers ----------
     const edgeGroup = make("g");
     const nodeGroup = make("g");
     this.#svg.appendChild(edgeGroup);
     this.#svg.appendChild(nodeGroup);
 
-    // ---------- 4. SVG Drawing Helpers ----------
+    // ---------- 6. SVG Drawing Helpers ----------
     const drawBezierEdge = (x1, y1, x2, y2, timeLabel, opacity = "0.4") => {
       const path = make("path");
       const midX = (x1 + x2) / 2;
@@ -266,31 +258,45 @@ export default class TraversalTreeViewerManager {
       };
     };
 
-    // ---------- 5. Render Nodes ----------
-    const pos = new Map();
+    // ---------- 7. Render Nodes & Capture Bounds ----------
+    const finalPos = new Map();
 
     for (const n of res.allNodes) {
-      const lane = laneOf.get(n.id) ?? 0;
-      const x = timeToX(n); // Now uses n.time
-      const y = TOP_PAD + lane * Y_GAP;
-
+      const { x, y } = layoutPos.get(n.id);
       const dims = drawTextNode(x, y, n.v, n.S);
-      pos.set(n.id, { x, y, ...dims });
+      finalPos.set(n.id, { x, y, ...dims });
     }
 
-    // ---------- 6. Render Edges with Time Labels ----------
+    // ---------- 8. Render Edges with Time Labels ----------
     for (const n of res.allNodes) {
-      const to = pos.get(n.id);
+      const to = finalPos.get(n.id);
       if (!to) continue;
 
       for (const p of n.parents ?? []) {
-        const from = pos.get(p.id);
+        const from = finalPos.get(p.id);
         if (!from) continue;
 
-        // Pass n.time directly to the label instead of getDepth(n.id)
         drawBezierEdge(from.xOut, from.yMid, to.xIn, to.yMid, n.time);
       }
     }
+
+    // ---------- 9. Dynamically Resize SVG for Scrolling ----------
+    let maxX = 0;
+    let maxY = 0;
+
+    for (const bounds of finalPos.values()) {
+      const rightEdge = bounds.xOut + 150;
+      const bottomEdge = bounds.yMid + 150;
+
+      if (rightEdge > maxX) maxX = rightEdge;
+      if (bottomEdge > maxY) maxY = bottomEdge;
+    }
+
+    const clientWidth = this.#root.clientWidth || 800;
+    const clientHeight = this.#root.clientHeight || 600;
+
+    this.#svg.style.width = `${Math.max(maxX, clientWidth)}px`;
+    this.#svg.style.height = `${Math.max(maxY, clientHeight)}px`;
   }
 
   #renderResults(res) {
