@@ -1,5 +1,5 @@
 // script/managers/parallel/TraversalTreeManager.mjs
-import { generateTraversalTreeFromJSON } from "../../services/parallel/TraversalTree.mjs";
+import { generateTraversalTreeFromJSON } from "../../services/parallel/NewTraversalTree.mjs";
 
 export default class TraversalTreeManager {
   constructor(context) {

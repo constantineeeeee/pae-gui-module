@@ -66,13 +66,13 @@ export default class TraversalTreeViewerManager {
 
     this.#clearSVG();
 
-    if (!res || res === 0) {
-      this.#drawMessage("No traversal tree generated.");
-      return;
-    }
+    // if (!res || res === 0) {
+    //   this.#drawMessage("No traversal tree generated.");
+    //   return;
+    // }
 
-    this.#renderResults(res);
-    this.#renderTree(res);
+    // this.#renderResults(res);
+    // this.#renderTree(res);
   }
 
   #drawMessage(text) {
