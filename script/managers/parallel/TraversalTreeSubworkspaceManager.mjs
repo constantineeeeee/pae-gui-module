@@ -66,13 +66,13 @@ export default class TraversalTreeViewerManager {
 
     this.#clearSVG();
 
-    // if (!res || res === 0) {
-    //   this.#drawMessage("No traversal tree generated.");
-    //   return;
-    // }
+    if (!res || res === 0) {
+      this.#drawMessage("No traversal tree generated.");
+      return;
+    }
 
-    // this.#renderResults(res);
-    // this.#renderTree(res);
+    this.#renderResults(res);
+    this.#renderTree(res);
   }
 
   #drawMessage(text) {
@@ -89,54 +89,29 @@ export default class TraversalTreeViewerManager {
     const make = (tag) => document.createElementNS(SVG_NS, tag);
     const sToString = (S) => `S([${(S ?? []).join(",")}])`;
 
-    // ---------- 0. Calculate Level/Depth (Arcs from Root) ----------
+    // ---------- 0. Use Pre-Calculated Time from Generator ----------
     const nodeMap = new Map(res.allNodes.map((n) => [n.id, n]));
-    const depthMap = new Map();
 
-    // Recursive helper to find the longest path (number of arcs) to a node
-    const getDepth = (id) => {
-      if (depthMap.has(id)) return depthMap.get(id);
-      
-      const node = nodeMap.get(id);
-      if (!node || !node.parents || node.parents.length === 0) {
-        depthMap.set(id, 0); // Root node has 0 arcs in its path
-        return 0;
-      }
-
-      let maxParentDepth = -1;
-      for (const p of node.parents) {
-        const pDepth = getDepth(p.id);
-        if (pDepth > maxParentDepth) maxParentDepth = pDepth;
-      }
-
-      const depth = maxParentDepth + 1;
-      depthMap.set(id, depth);
-      return depth;
-    };
-
-    // Pre-calculate depth for all nodes
-    for (const n of res.allNodes) getDepth(n.id);
-
-    // Calculate X coordinate based on arc depth instead of internal time
+    // Calculate X coordinate based on the mathematical time instead of arc depth
     const timeToX = (n) => {
-      const depth = getDepth(n.id);
+      const t = n.time; // Read direct property from the generator
       
       // 1. Root nodes
-      if (depth === 0) return LEFT_PAD;
+      if (t === 0) return LEFT_PAD;
       
-      // 2. Immediate children (1 arc away)
-      if (depth === 1) return LEFT_PAD + FIRST_GAP * 0.55;
+      // 2. Immediate children (t = 1)
+      if (t === 1) return LEFT_PAD + FIRST_GAP * 0.55;
 
-      // 3. Normal nodes at depth >= 2
-      return LEFT_PAD + FIRST_GAP + (depth - 2) * LATER_GAP;
+      // 3. Normal nodes at t >= 2
+      return LEFT_PAD + FIRST_GAP + (t - 2) * LATER_GAP;
     };
 
-    // ---------- 1. Group nodes by Level/Depth ----------
+    // ---------- 1. Group nodes by Time ----------
     const byTime = new Map();
     for (const n of res.allNodes) {
-      const depth = getDepth(n.id);
-      if (!byTime.has(depth)) byTime.set(depth, []);
-      byTime.get(depth).push(n);
+      const t = n.time;
+      if (!byTime.has(t)) byTime.set(t, []);
+      byTime.get(t).push(n);
     }
 
     const times = [...byTime.keys()].sort((a, b) => a - b);
@@ -173,17 +148,17 @@ export default class TraversalTreeViewerManager {
       for (const n of nodes) {
         const parent = n.parents?.[0];
         const preferred = parent ? (laneOf.get(parent.id) ?? 0) : 0;
-        const depth = getDepth(n.id);
+        const nTime = n.time;
 
-        let maxChildTime = depth;
+        let maxChildTime = nTime;
         for (const c of n.children ?? []) {
-          const cDepth = getDepth(c.id);
-          if (cDepth > maxChildTime) maxChildTime = cDepth;
+          const cTime = c.time;
+          if (cTime > maxChildTime) maxChildTime = cTime;
         }
 
         // Reserve span up to furthest child (or a slight bump if no children to reserve the cell)
-        const start = depth;
-        const end = maxChildTime > depth ? maxChildTime : depth + 0.5;
+        const start = nTime;
+        const end = maxChildTime > nTime ? maxChildTime : nTime + 0.5;
 
         let assignedLane = -1;
 
@@ -296,7 +271,7 @@ export default class TraversalTreeViewerManager {
 
     for (const n of res.allNodes) {
       const lane = laneOf.get(n.id) ?? 0;
-      const x = timeToX(n);
+      const x = timeToX(n); // Now uses n.time
       const y = TOP_PAD + lane * Y_GAP;
 
       const dims = drawTextNode(x, y, n.v, n.S);
@@ -312,8 +287,8 @@ export default class TraversalTreeViewerManager {
         const from = pos.get(p.id);
         if (!from) continue;
 
-        // Use the newly calculated depth for the label
-        drawBezierEdge(from.xOut, from.yMid, to.xIn, to.yMid, getDepth(n.id));
+        // Pass n.time directly to the label instead of getDepth(n.id)
+        drawBezierEdge(from.xOut, from.yMid, to.xIn, to.yMid, n.time);
       }
     }
   }

@@ -105,20 +105,14 @@ export function generateTraversalTreeFromJSON(
   let traversalActive = true;
 
   while (traversalActive) {
-    // 1. Find all active leaf nodes
-    let X = allNodes.filter((n) => n.children?.length === 0 && !n.isPending);
+    // 1. Find all active leaf nodes (Ignore pending nodes and cycle terminals)
+    let X = allNodes.filter(
+      (n) => n.children?.length === 0 && !n.isPending && !n.isCycleTerminal,
+    );
 
     // 2. Termination Check: Are we strictly at the sink?
     if (X.length === 1 && X[0].v === sink[0]) {
       console.log("Reached the sink successfully.");
-      break;
-    }
-
-    // 3. Dead end check
-    if (X.length === 0) {
-      console.log("No active branches left. Checking pending nodes...");
-      // If we have pending nodes (AND/MIX joins waiting), we handle them in Phase 3
-      // For now, if everything is stuck, we break.
       break;
     }
 
@@ -193,13 +187,14 @@ export function generateTraversalTreeFromJSON(
           children: [],
           isPending: false,
           edgeVisits: newEdgeVisits,
-          path: [...nodeX.path, yj]
+          path: [...nodeX.path, yj],
         };
 
         // --- CYCLE APPENDING (Lines 15-27) & FORWARD APPENDING (Lines 47-66) ---
         if (isAncestor) {
           if (edge.C === "ϵ" || edge.C === "EPS") {
             newNode.S.push(`cycle_resolved_${yj}`);
+            newNode.isCycleTerminal = true;
             nodeX.children.push(newNode);
             allNodes.push(newNode);
           } else {
@@ -231,7 +226,7 @@ export function generateTraversalTreeFromJSON(
 
     if (!progressedThisIteration) {
       // Find all nodes currently waiting at a join
-      let pendingNodes = allNodes.filter(n => n.isPending);
+      let pendingNodes = allNodes.filter((n) => n.isPending);
 
       if (pendingNodes.length > 0) {
         // Group them by their vertex 'v' (the join component)
@@ -243,7 +238,7 @@ export function generateTraversalTreeFromJSON(
 
         for (let [joinV, nodesToMerge] of pendingByVertex.entries()) {
           // 1. Combine the S sets (Union of conditions from all parallel branches)
-          let mergedS = [...new Set(nodesToMerge.flatMap(n => n.S || []))];
+          let mergedS = [...new Set(nodesToMerge.flatMap((n) => n.S || []))];
 
           // 2. Combine edge visits (Take the max of each edge visited to respect loops safely)
           let mergedVisits = {};
@@ -254,19 +249,21 @@ export function generateTraversalTreeFromJSON(
           }
 
           // 3. Combine paths
-          let mergedPath = [...new Set(nodesToMerge.flatMap(n => n.path || []))];
+          let mergedPath = [
+            ...new Set(nodesToMerge.flatMap((n) => n.path || [])),
+          ];
 
           // 4. Create the Merged Node!
           let mergedNode = {
             id: `node_${i}`,
             v: joinV,
             S: mergedS,
-            parents: nodesToMerge,  // Notice it has MULTIPLE parents now!
+            parents: nodesToMerge, // Notice it has MULTIPLE parents now!
             children: [],
-            isPending: false,       // Unlocked and ready to traverse forward
+            isPending: false, // Unlocked and ready to traverse forward
             isCycleTerminal: false,
             edgeVisits: mergedVisits,
-            path: mergedPath
+            path: mergedPath,
           };
 
           // 5. Update relationships: link the old branches to this new merged node
@@ -283,13 +280,11 @@ export function generateTraversalTreeFromJSON(
     }
   }
 
-  
-
   console.log("Final allNodes:", allNodes);
   console.log(`Final allNodes: (${allNodes.length})`, allNodes);
 
   console.log("--- NODE PATHS (CONDITIONS) ---");
-  allNodes.forEach(n => {
+  allNodes.forEach((n) => {
     const formattedS = `S([${(n.S || []).join(", ")}])`;
     console.log(`${n.id} (${n.v}): ${formattedS}`);
   });
