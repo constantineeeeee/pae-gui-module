@@ -6,7 +6,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const LEFT_PAD = 80; 
 const TOP_PAD = 60;
 const X_GAP = 320; 
-const Y_GAP = 90;  
+const Y_GAP = 150;  
 const BOX_PAD_X = 10;
 const BOX_PAD_Y = 8;
 
@@ -64,13 +64,13 @@ export default class TraversalTreeViewerManager {
 
     this.#clearSVG();
 
-    // if (!res || res === 0) {
-    //   this.#drawMessage("No traversal tree generated.");
-    //   return;
-    // }
+    if (!res || res === 0) {
+      this.#drawMessage("No traversal tree generated.");
+      return;
+    }
 
-    // this.#renderResults(res);
-    // this.#renderTree(res);
+    this.#renderResults(res);
+    this.#renderTree(res);
   }
 
   #drawMessage(text) {
@@ -242,8 +242,7 @@ export default class TraversalTreeViewerManager {
       const dims = drawTextNode(x, y, n.v, n.S);
       finalPos.set(n.id, { id: n.id, v: n.v, x, y, ...dims });
     }
-
-    // ---------- 7. Render Edges (Hiding Cross-Links) ----------
+// ---------- 7. Render Edges (Visually Converging Joins) ----------
     for (const n of res.allNodes) {
       const to = finalPos.get(n.id);
       if (!to) continue;
@@ -252,82 +251,13 @@ export default class TraversalTreeViewerManager {
         const from = finalPos.get(p.id);
         if (!from) continue;
 
-        // Turn the arc into a vertical line by skipping the Bezier!
-        if (n.crossParents && n.crossParents.includes(p.id)) {
-          continue; 
-        }
-
+        // We REMOVED the crossParents check here! 
+        // Now, every parent branch will draw a beautiful Bezier curve 
+        // that converges directly into this single merged node.
         drawBezierEdge(from.xOut, from.yMid, to.xIn, to.yMid, n.time);
       }
     }
 
-    // ---------- 8. Draw Vertical Bracket Lines ----------
-    const nodesByColAndV = new Map();
-
-    for (const n of res.allNodes) {
-      const pos = finalPos.get(n.id);
-      if (!pos) continue;
-
-      const key = `${pos.x}_${n.v}`;
-      if (!nodesByColAndV.has(key)) nodesByColAndV.set(key, []);
-      nodesByColAndV.get(key).push(n);
-    }
-
-    for (const nodes of nodesByColAndV.values()) {
-      if (nodes.length <= 1) continue;
-
-      // Group nodes that share an intersecting parent
-      // Since we kept the cross-link in `parents`, MIX joins perfectly cluster together!
-      const clusters = [];
-      for (const n of nodes) {
-        let added = false;
-        for (const cluster of clusters) {
-          const sharesParent = cluster.some(cn => 
-            n.parents.some(p => cn.parents.some(cp => cp.id === p.id))
-          );
-          if (sharesParent) {
-            cluster.push(n);
-            added = true;
-            break;
-          }
-        }
-        if (!added) clusters.push([n]);
-      }
-
-      for (const cluster of clusters) {
-        if (cluster.length > 1) {
-          cluster.sort((a, b) => finalPos.get(a.id).yMid - finalPos.get(b.id).yMid);
-
-          const minY = finalPos.get(cluster[0].id).yMid;
-          const maxY = finalPos.get(cluster[cluster.length - 1].id).yMid;
-          const lineX = finalPos.get(cluster[0].id).xIn - 12;
-
-          const vLine = make("line");
-          vLine.setAttribute("x1", String(lineX));
-          vLine.setAttribute("y1", String(minY));
-          vLine.setAttribute("x2", String(lineX));
-          vLine.setAttribute("y2", String(maxY));
-          vLine.setAttribute("stroke", "currentColor");
-          vLine.setAttribute("stroke-width", "2");
-          vLine.setAttribute("stroke-dasharray", "4 4");
-          vLine.setAttribute("opacity", "0.4");
-          
-          const capTop = make("line");
-          capTop.setAttribute("x1", String(lineX)); capTop.setAttribute("y1", String(minY));
-          capTop.setAttribute("x2", String(lineX + 6)); capTop.setAttribute("y2", String(minY));
-          capTop.setAttribute("stroke", "currentColor"); capTop.setAttribute("stroke-width", "2"); capTop.setAttribute("opacity", "0.4");
-
-          const capBottom = make("line");
-          capBottom.setAttribute("x1", String(lineX)); capBottom.setAttribute("y1", String(maxY));
-          capBottom.setAttribute("x2", String(lineX + 6)); capBottom.setAttribute("y2", String(maxY));
-          capBottom.setAttribute("stroke", "currentColor"); capBottom.setAttribute("stroke-width", "2"); capBottom.setAttribute("opacity", "0.4");
-
-          syncGroup.appendChild(vLine);
-          syncGroup.appendChild(capTop);
-          syncGroup.appendChild(capBottom);
-        }
-      }
-    }
 
     // ---------- 9. Dynamically Resize SVG ----------
     let maxX = 0;

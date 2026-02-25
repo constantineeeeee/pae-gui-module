@@ -79,7 +79,47 @@ export function generateTraversalTreeFromJSON(
 
   const joinTypes = classifyJoin(inc);
 
-  // START ALGORITHM FOR GENERATING TRAVERSAL TREES
+  // --- NEW: DETECT RESET-BOUND SUBSYSTEMS (RBS) ---
+  const rbsResetMap = new Map();
+
+  vertices.forEach((v) => {
+    // Check if the vertex is an RBS center (M == 1)
+    if (v.M == 1 || v.m == 1 || v.M === "1") {
+      const insideEdges = new Set();
+      const insideNodes = new Set();
+
+      // Step 1: Only the direct "" (epsilon) arcs from the center are "inside" edges
+      const outgoingFromCenter = out.get(v.id) || [];
+      for (let e of outgoingFromCenter) {
+        let cVal = e.C === "" || e.C === "ϵ" ? EPS : e.C;
+        if (cVal === EPS) {
+          const edgeKey = `${e.from}->${e.to}`;
+          insideEdges.add(edgeKey);
+          insideNodes.add(e.to); // These are strictly the "inside" vertices
+        }
+      }
+
+      // Step 2: Any arc exiting those inside vertices is an outbridge!
+      // (Even if it is an epsilon arc itself, because it leaves the RBS boundary)
+      insideNodes.forEach((nodeId) => {
+        const outgoing = out.get(nodeId) || [];
+        for (let e of outgoing) {
+          const edgeKey = `${e.from}->${e.to}`;
+
+          // If it's an edge exiting the inside node (and not an inside edge itself)
+          if (!insideEdges.has(edgeKey)) {
+            if (!rbsResetMap.has(edgeKey)) {
+              rbsResetMap.set(edgeKey, new Set());
+            }
+            // Link this outbridge to all inside edges of this specific RBS
+            insideEdges.forEach((ie) => rbsResetMap.get(edgeKey).add(ie));
+          }
+        }
+      });
+    }
+  });
+  // ------------------------------------------------
+
   // START ALGORITHM FOR GENERATING TRAVERSAL TREES
   let i = 1;
   let allNodes = [];
@@ -97,20 +137,19 @@ export function generateTraversalTreeFromJSON(
     path: [sourceVId],
     triggerEdge: null,
     triggerC: null,
-    choices: {}, // <--- NEW: Tracks the "universe" this path belongs to
+    choices: {},
   };
 
   allNodes.push(rootNode);
 
   let traversalActive = true;
-
   while (traversalActive) {
-    // --- PHASE 2: FORWARD TRAVERSAL ---
+    // --- PHASE 2: FORWARD TRAVERSAL (Natural Unrolling) ---
     let X = allNodes.filter(
       (n) => n.children?.length === 0 && !n.isPending && !n.isCycleTerminal,
     );
 
-    if (X.length === 1 && X[0].v === sink[0]) {
+    if (X.length === 1 && sink.includes(X[0].v)) {
       console.log("Reached the sink successfully.");
       break;
     }
@@ -127,12 +166,25 @@ export function generateTraversalTreeFromJSON(
         const isAncestor = nodeX.path.includes(yj);
         const currentVisits = nodeX.edgeVisits[edgeKey] || 0;
         const maxVisits = edge.L !== undefined ? edge.L : 1;
+
+        // Strictly respect the L-attributes
         if (currentVisits >= maxVisits) continue;
 
         let newEdgeVisits = {
           ...nodeX.edgeVisits,
           [edgeKey]: currentVisits + 1,
         };
+
+        // --- NEW: RBS RESET MECHANIC ---
+        // If this edge is an outbridge, reset the L-values for the RBS's internal edges
+        if (rbsResetMap.has(edgeKey)) {
+          const edgesToReset = rbsResetMap.get(edgeKey);
+          edgesToReset.forEach((innerEdgeKey) => {
+            newEdgeVisits[innerEdgeKey] = 0; // Restore capacity
+          });
+        }
+        // -------------------------------
+
         let cVal = edge.C === "" || edge.C === "ϵ" ? EPS : edge.C;
         let newS = [...nodeX.S, cVal];
 
@@ -148,11 +200,11 @@ export function generateTraversalTreeFromJSON(
           path: [...nodeX.path, yj],
           triggerEdge: edgeKey,
           triggerC: cVal,
-          choices: { ...nodeX.choices }, // Inherit universe choices
+          choices: { ...nodeX.choices },
         };
 
         if (isAncestor) {
-          if (cVal === EPS) {
+          if (cVal === EPS && edge.L === undefined) {
             newNode.S.push(`cycle_resolved_${yj}`);
             newNode.isCycleTerminal = true;
             nodeX.children.push(newNode);
@@ -203,7 +255,6 @@ export function generateTraversalTreeFromJSON(
               [[]],
             );
 
-            // NEW: Filter out combinations from colliding universes!
             const isValidCombination = (pair) => {
               let mergedChoices = {};
               for (let n of pair) {
@@ -237,7 +288,6 @@ export function generateTraversalTreeFromJSON(
               if (joinType === "AND") {
                 let conditions = pair.map((n) => n.triggerC);
                 let groupedC = `(${conditions.join(",")})`;
-
                 createMergedNode(
                   pair,
                   joinV,
@@ -249,7 +299,6 @@ export function generateTraversalTreeFromJSON(
                 let nodeC = pair.find((n) => n.triggerC !== EPS);
 
                 if (nodeEps && nodeC) {
-                  // Behavior 1: MIX/AND
                   let mixAndChoices = { ...mergedChoices, [joinV]: "AND" };
                   createMergedNode(
                     pair,
@@ -258,19 +307,14 @@ export function generateTraversalTreeFromJSON(
                     mixAndChoices,
                   );
 
-                  // Behavior 2: MIX/OR
                   let mixOrChoices = { ...nodeC.choices, [joinV]: "OR" };
                   createMergedNode([nodeC], joinV, [...nodeC.S], mixOrChoices);
                 }
               }
-
-              // Track which nodes successfully merged so we can unlock them
               for (let n of pair) mergedNodesThisIteration.add(n);
             }
 
-            for (let n of mergedNodesThisIteration) {
-              n.isPending = false;
-            }
+            for (let n of mergedNodesThisIteration) n.isPending = false;
             progressedThisIteration = true;
           }
         }
@@ -296,6 +340,8 @@ export function generateTraversalTreeFromJSON(
       v: joinV,
       S: mergedS,
       parents: parents,
+      // NEW: Tell the renderer that all parents after the first one are "cross-links"
+      crossParents: parents.slice(1).map((p) => p.id),
       children: [],
       isPending: false,
       isCycleTerminal: false,
@@ -303,23 +349,85 @@ export function generateTraversalTreeFromJSON(
       path: mergedPath,
       triggerEdge: null,
       triggerC: null,
-      choices: choices, // Apply the new universe tracking
+      choices: choices,
     };
 
-    for (let parent of parents) {
-      parent.children.push(mergedNode);
-    }
+    for (let parent of parents) parent.children.push(mergedNode);
     allNodes.push(mergedNode);
   }
 
-  // --- PHASE 4: EXTRACT FINAL PATHS ---
+  // --- PHASE 4: EXTRACT UNIQUE MAXIMAL PATHS ---
   console.log("--- FINAL SPANNING TREE PATHS ---");
-  let leafNodes = allNodes.filter(
-    (n) => n.children.length === 0 && !n.isPending,
-  ); // Ignore stalled invalid universes
 
-  leafNodes.forEach((n) => {
-    const formattedS = `S([${n.S.join(",")}])`;
-    console.log(formattedS);
+  // 1. Filter: Keep only the nodes that successfully reached the Sink
+  let successfulPaths = allNodes.filter(
+    (n) => n.children.length === 0 && !n.isPending && sink.includes(n.v),
+  );
+
+  // 2. Group by "Path Family" to extract maximal loops
+  let pathFamilies = new Map();
+
+  successfulPaths.forEach((n) => {
+    // Sort the unique vertices so topological route variations match the same family
+    const routeSignature = [...new Set(n.path)].sort().join("|");
+    const choiceKey = JSON.stringify(n.choices || {});
+    const familyKey = `${choiceKey}|${routeSignature}`;
+
+    if (!pathFamilies.has(familyKey)) {
+      pathFamilies.set(familyKey, []);
+    }
+    pathFamilies.get(familyKey).push(n);
   });
+
+  // 3. For each family, keep ONLY the one with the longest S (the maximal loop execution)
+  let maximalPaths = [];
+  for (let familyNodes of pathFamilies.values()) {
+    let maxNode = familyNodes[0];
+    for (let node of familyNodes) {
+      if (node.S.length > maxNode.S.length) {
+        maxNode = node;
+      }
+    }
+    maximalPaths.push(maxNode);
+  }
+  // 4. Final De-duplication: Store the actual Node (not just the string)
+  let uniqueMaximalPaths = new Map();
+  maximalPaths.forEach((n) => {
+    const sString = n.S.join(",");
+    if (!uniqueMaximalPaths.has(sString)) {
+      uniqueMaximalPaths.set(sString, n); // <--- Store the whole node
+    }
+  });
+
+  // 5. Output to Console
+  uniqueMaximalPaths.forEach((node, pathS) => {
+    console.log(`S([${pathS}])`);
+  });
+
+  // --- NEW: PHASE 5 - PRUNE DEAD-END BRANCHES FOR RENDERER ---
+  // Backtrack from the 4 successful paths and keep ONLY their ancestors
+  const survivingNodes = new Set();
+  const queue = Array.from(uniqueMaximalPaths.values());
+
+  while (queue.length > 0) {
+    const curr = queue.shift();
+    if (!survivingNodes.has(curr)) {
+      survivingNodes.add(curr);
+      if (curr.parents) {
+        curr.parents.forEach((p) => queue.push(p));
+      }
+    }
+  }
+
+  // Filter out the noise and fix references
+  allNodes = allNodes.filter((n) => survivingNodes.has(n));
+  allNodes.forEach((n) => {
+    n.children = n.children.filter((c) => survivingNodes.has(c));
+    n.time = n.S.length; // Assign X-axis depth for renderer
+  });
+
+  return {
+    allNodes: allNodes,
+    maximalPaths: Array.from(uniqueMaximalPaths.values()),
+  };
 }
