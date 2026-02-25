@@ -1,19 +1,28 @@
 import { parseRDLT } from "../convert/rdlt2pn/modules/parser.js";
-
 const EPS = "ϵ";
+
+function normId(x) {
+  // Ensure Map keys are consistent (strings)
+  return String(x);
+}
 
 function buildAdjacency(vertices, edges) {
   const out = new Map();
   const inc = new Map();
 
   for (const v of vertices) {
-    out.set(v.id, []);
-    inc.set(v.id, []);
+    const id = normId(v.id);
+    out.set(id, []);
+    inc.set(id, []);
   }
 
   edges.forEach((e, idx) => {
-    out.get(e.from).push({ ...e, __idx: idx });
-    inc.get(e.to).push({ ...e, __idx: idx });
+    const from = normId(e.from);
+    const to = normId(e.to);
+
+    const edge = { ...e, from, to, __idx: idx };
+    out.get(from).push(edge);
+    inc.get(to).push(edge);
   });
 
   return { out, inc };
@@ -22,14 +31,20 @@ function buildAdjacency(vertices, edges) {
 function computeSourceSink(vertices, edges) {
   const incCount = Object.create(null);
   const outCount = Object.create(null);
+
   vertices.forEach((v) => {
-    incCount[v.id] = 0;
-    outCount[v.id] = 0;
+    const id = String(v.id);
+    incCount[id] = 0;
+    outCount[id] = 0;
   });
+
   edges.forEach((e) => {
-    outCount[e.from] = (outCount[e.from] ?? 0) + 1;
-    incCount[e.to] = (incCount[e.to] ?? 0) + 1;
+    const from = String(e.from);
+    const to = String(e.to);
+    outCount[from] = (outCount[from] ?? 0) + 1;
+    incCount[to] = (incCount[to] ?? 0) + 1;
   });
+
   const source = Object.keys(incCount).filter((id) => incCount[id] === 0);
   const sink = Object.keys(outCount).filter((id) => outCount[id] === 0);
 
@@ -124,7 +139,7 @@ export function generateTraversalTreeFromJSON(
   let i = 1;
   let allNodes = [];
 
-  const sourceVId = source[0];
+  const sourceVId = String(source[0]);
   let rootNode = {
     id: `T_${i++}`,
     v: sourceVId,
@@ -423,7 +438,15 @@ export function generateTraversalTreeFromJSON(
   allNodes = allNodes.filter((n) => survivingNodes.has(n));
   allNodes.forEach((n) => {
     n.children = n.children.filter((c) => survivingNodes.has(c));
-    n.time = n.S.length; // Assign X-axis depth for renderer
+
+    allNodes.forEach((n) => {
+      if (!n.parents || n.parents.length === 0) {
+        n.time = 0;
+      } else {
+        const maxParentTime = Math.max(...n.parents.map((p) => p.time ?? 0));
+        n.time = maxParentTime + 1;
+      }
+    });
   });
 
   return {
