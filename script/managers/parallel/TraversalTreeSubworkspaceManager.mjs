@@ -327,38 +327,68 @@ export default class TraversalTreeViewerManager {
     this.#svg.style.height = `${Math.max(maxY, clientHeight)}px`;
   }
 
-  // ... (Keep the rest of your class unmodified)
   #renderResults(res) {
     const parallelHost = this.#root.querySelector("[data-tt-parallel]");
-    const nonParallelHost = this.#root.querySelector("[data-tt-nonparallel]");
-    if (!parallelHost || !nonParallelHost) return;
+    if (!parallelHost) return;
 
+    // Clear previous results
     parallelHost.innerHTML = "";
-    nonParallelHost.innerHTML = "";
 
     const fmtS = (S) => `S([${(S ?? []).join(",")}])`;
 
-    const renderGroup = (host, title, branches) => {
-      const wrap = document.createElement("div");
-      wrap.className = "tt-group";
-
-      const head = document.createElement("div");
-      head.className = "tt-group-title";
-      head.textContent = title;
-      wrap.appendChild(head);
-
+    const renderGroup = (host, branches) => {
       const list = document.createElement("div");
       list.className = "tt-branch-list";
+      list.style.display = "flex";
+      list.style.flexDirection = "column";
+      list.style.gap = "8px";
 
       for (const b of branches) {
         const row = document.createElement("div");
         row.className = "tt-branch-row";
+        row.style.fontSize = "13px";
+        row.style.paddingBottom = "4px";
+        row.style.borderBottom = "1px solid rgba(255,255,255,0.1)";
         row.textContent = `${b.v}  —  ${fmtS(b.S)}`;
         list.appendChild(row);
       }
 
-      wrap.appendChild(list);
-      host.appendChild(wrap);
+      host.appendChild(list);
     };
+
+    // 1. Render the strings into the UI panel
+    if (res.maximalPaths && res.maximalPaths.length > 0) {
+      renderGroup(parallelHost, res.maximalPaths);
+    } else {
+      parallelHost.textContent = "No parallel branches calculated.";
+    }
+
+    // 2. Populate Sidebar Details (Nodes, Times, Source, Sink)
+    const sourceMeta = this.#root.querySelector('[data-tt-meta="source"]');
+    const sinkMeta = this.#root.querySelector('[data-tt-meta="sink"]');
+    const nodesMeta = this.#root.querySelector('[data-tt-meta="nodes"]');
+    const timesMeta = this.#root.querySelector('[data-tt-meta="times"]');
+
+    if (sourceMeta && res.allNodes) {
+      const roots = res.allNodes.filter(
+        (n) => !n.parents || n.parents.length === 0,
+      );
+      sourceMeta.textContent =
+        [...new Set(roots.map((r) => r.v))].join(", ") || "—";
+    }
+
+    if (sinkMeta && res.maximalPaths) {
+      sinkMeta.textContent =
+        [...new Set(res.maximalPaths.map((p) => p.v))].join(", ") || "—";
+    }
+
+    if (nodesMeta && res.allNodes) {
+      nodesMeta.textContent = res.allNodes.length;
+    }
+
+    if (timesMeta && res.allNodes) {
+      const maxTime = Math.max(...res.allNodes.map((n) => n.time || 0));
+      timesMeta.textContent = `0 to ${maxTime}`;
+    }
   }
 }

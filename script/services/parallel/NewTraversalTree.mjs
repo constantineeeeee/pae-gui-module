@@ -240,14 +240,14 @@ export function generateTraversalTreeFromJSON(
             nodeX.children.push(newNode);
             allNodes.push(newNode);
             const joinType = joinTypes.get(yj);
-            if (joinType === "AND")
+            if (joinType === "AND" || joinType === "MIX")
               newNode.isPending = true;
           }
         } else {
           nodeX.children.push(newNode);
           allNodes.push(newNode);
           const joinType = joinTypes.get(yj);
-          if (joinType === "AND")
+          if (joinType === "AND" || joinType === "MIX")
             newNode.isPending = true;
         }
         progressedThisIteration = true;
