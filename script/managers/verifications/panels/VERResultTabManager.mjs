@@ -24,6 +24,10 @@ export default class VERResultTabManager {
    *      section: HTMLDivElement,
    *      table: HTMLTableElement,
    *   },
+   *   theoreticalNotes: {
+   *      section: HTMLDivElement,
+   *      content: HTMLDivElement,
+   *   },
    *   violatingArcs: {
    *      section: HTMLDivElement,
    *      table: HTMLTableElement,
@@ -37,6 +41,7 @@ export default class VERResultTabManager {
   #view = {
     conclusion: { root: null, title: null, description: null },
     criteria: { section: null, table: null },
+    theoreticalNotes: { section: null, content: null },
     violatingArcs: { section: null, table: null },
     violatingVertices: { section: null, table: null },
   };
@@ -62,6 +67,12 @@ export default class VERResultTabManager {
     );
     this.#view.criteria.table = this.#rootElement.querySelector(
       `[data-ver-section="criteria"] table`
+    );
+    this.#view.theoreticalNotes.section = this.#rootElement.querySelector(
+      `[data-ver-section="theoretical-notes"]`
+    );
+    this.#view.theoreticalNotes.content = this.#rootElement.querySelector(
+      `[data-ver-section="theoretical-notes"] .theoretical-notes-content`
     );
     this.#view.violatingVertices.section = this.#rootElement.querySelector(
       `[data-ver-section="v-vertices"]`
@@ -142,11 +153,38 @@ export default class VERResultTabManager {
       criteriaSection.classList.add("hidden");
     }
 
+    // Setup theoretical notes
+    const theoreticalNotesSection = this.#view.theoreticalNotes.section;
+    const theoreticalNotesContent = this.#view.theoreticalNotes.content;
+    theoreticalNotesContent.innerHTML = "";
+    
+    // Check if this instance has theoretical notes (added by soundness-service for lazy soundness)
+    const theoreticalNote = instance.evaluation?.theoreticalNote;
+    if (theoreticalNote) {
+      theoreticalNotesSection.classList.remove("hidden");
+      
+      const noteElement = buildElement("div", { classname: "theoretical-note" }, [
+        buildElement("div", { classname: "note-theorem" }, [theoreticalNote.theorem]),
+        buildElement("div", { classname: "note-statement" }, [theoreticalNote.statement]),
+        buildElement("div", { classname: "note-explanation" }, [theoreticalNote.explanation])
+      ]);
+      
+      theoreticalNotesContent.appendChild(noteElement);
+    } else {
+      theoreticalNotesSection.classList.add("hidden");
+    }
+
     // Setup violating arcs
     const violatingArcsSection = this.#view.violatingArcs.section;
     const violatingArcsTableBody =
       this.#view.violatingArcs.table.querySelector("tbody");
     violatingArcsTableBody.innerHTML = "";
+
+    // Dynamic header: "Shared Arc" instance shows "Shared Arc", all others show "Violating Arcs"
+    const arcsHeader = violatingArcsSection.querySelector("header");
+    if (arcsHeader) {
+      arcsHeader.textContent = (name === "Shared Arc") ? "Shared Arc" : "Violating Arcs";
+    }
 
     if (violating?.arcs && violating.arcs.length > 0) {
       violatingArcsSection.classList.remove("hidden");

@@ -1,4 +1,3 @@
-
 .model-context > main > .subworkspace > main > .drawing {
   flex: 1;
 }
@@ -234,6 +233,15 @@ svg .arc-waypoint:not([data-nomove]) {
 
 .ver-subworkspace .component.active .component-circle {
   stroke: #ff5050;
+}
+
+/* Green highlight when showing the Shared Arc (lazy sound witness) */
+.ver-subworkspace[data-ver-highlight="shared"] .arc.active .arc-highlight {
+  stroke: #4caf50;
+}
+
+.ver-subworkspace[data-ver-highlight="shared"] .component.active .component-circle {
+  stroke: #4caf50;
 }
 
 .vs-subworkspace .arc.abstract .arc-bare {

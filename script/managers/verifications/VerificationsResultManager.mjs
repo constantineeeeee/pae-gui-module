@@ -118,7 +118,7 @@ export class VerificationsResultManager {
         ? allArcs.filter((v) => instance.model?.arcs.includes(v.uid))
         : allArcs;
 
-      drawingManager.setupComponents(vertices, arcs);
+      drawingManager.setupComponents(vertices, arcs, instance.options);
 
       // Highlight violating arcs
       const violatingArcsUIDs = instance.evaluation?.violating?.arcs || [];
@@ -169,6 +169,14 @@ export class VerificationsResultManager {
     this.#subworkspaceManager
       .getInstanceSVG(instanceIndex)
       .classList.add("active");
+
+    // Set data attribute for highlight color: green for Shared Arc, red otherwise
+    const root = this.#subworkspaceManager.getRootElement();
+    if (instance.name === "Shared Arc") {
+      root.setAttribute("data-ver-highlight", "shared");
+    } else {
+      root.removeAttribute("data-ver-highlight");
+    }
 
     // Update result tab
     this.#panels.result.displayInstanceResult(instance);
