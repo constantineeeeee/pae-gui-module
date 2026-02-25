@@ -47,13 +47,58 @@ export default class TraversalTreeViewerManager {
         this.context.managers.workspace.gotoMainModel();
       });
 
+    // Add this new listener for the export action
+    root
+      .querySelector('[data-tt-action="exportTT"]')
+      ?.addEventListener("click", () => this.#exportImage());
+
     this.#runAndRender();
   }
 
-  #clearSVG() {
-    while (this.#svg.firstChild) {
-      this.#svg.removeChild(this.#svg.firstChild);
-    }
+  #exportImage() {
+    if (!this.#svg || !this.#svg.firstChild) return;
+
+    // 1. Serialize the SVG to a string
+    const svgData = new XMLSerializer().serializeToString(this.#svg);
+
+    // Replace 'currentColor' with a hardcoded black hex so it's visible in the exported PNG
+    const processedSvgData = svgData.replace(/currentColor/g, "#000000");
+
+    // 2. Prepare the Canvas
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    // Use the dynamically calculated width/height from the render logic
+    const width = parseInt(this.#svg.style.width, 10) || 800;
+    const height = parseInt(this.#svg.style.height, 10) || 600;
+
+    canvas.width = width;
+    canvas.height = height;
+
+    // Fill a white background (otherwise the PNG will be transparent)
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+
+    // 3. Create an Image object from the SVG string
+    const img = new Image();
+    const svgBlob = new Blob([processedSvgData], {
+      type: "image/svg+xml;charset=utf-8",
+    });
+    const url = URL.createObjectURL(svgBlob);
+
+    // 4. Draw to Canvas and Trigger Download once loaded
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url); // Clean up memory
+
+      const imgURI = canvas.toDataURL("image/png");
+      const a = document.createElement("a");
+      a.download = `Traversal-Tree-${this.id}.png`;
+      a.href = imgURI;
+      a.click();
+    };
+
+    img.src = url;
   }
 
   #runAndRender() {
@@ -62,7 +107,7 @@ export default class TraversalTreeViewerManager {
 
     const res = this.context.managers.traversalTree.run(snapshot);
 
-    this.#clearSVG();
+    // this.#clearSVG();
 
     if (!res || res === 0) {
       this.#drawMessage("No traversal tree generated.");

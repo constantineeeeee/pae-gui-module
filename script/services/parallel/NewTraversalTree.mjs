@@ -2,7 +2,6 @@ import { parseRDLT } from "../convert/rdlt2pn/modules/parser.js";
 const EPS = "ϵ";
 
 function normId(x) {
-  // Ensure Map keys are consistent (strings)
   return String(x);
 }
 
@@ -94,46 +93,49 @@ export function generateTraversalTreeFromJSON(
 
   const joinTypes = classifyJoin(inc);
 
-  // --- NEW: DETECT RESET-BOUND SUBSYSTEMS (RBS) ---
+  // --- DETECT RESET-BOUND SUBSYSTEMS (RBS) ---
   const rbsResetMap = new Map();
 
   vertices.forEach((v) => {
-    // Check if the vertex is an RBS center (M == 1)
     if (v.M == 1 || v.m == 1 || v.M === "1") {
       const insideEdges = new Set();
       const insideNodes = new Set();
 
-      // Step 1: Only the direct "" (epsilon) arcs from the center are "inside" edges
       const outgoingFromCenter = out.get(v.id) || [];
       for (let e of outgoingFromCenter) {
         let cVal = e.C === "" || e.C === "ϵ" ? EPS : e.C;
         if (cVal === EPS) {
           const edgeKey = `${e.from}->${e.to}`;
           insideEdges.add(edgeKey);
-          insideNodes.add(e.to); // These are strictly the "inside" vertices
+          insideNodes.add(e.to); 
         }
       }
 
-      // Step 2: Any arc exiting those inside vertices is an outbridge!
-      // (Even if it is an epsilon arc itself, because it leaves the RBS boundary)
       insideNodes.forEach((nodeId) => {
         const outgoing = out.get(nodeId) || [];
         for (let e of outgoing) {
           const edgeKey = `${e.from}->${e.to}`;
-
-          // If it's an edge exiting the inside node (and not an inside edge itself)
           if (!insideEdges.has(edgeKey)) {
             if (!rbsResetMap.has(edgeKey)) {
               rbsResetMap.set(edgeKey, new Set());
             }
-            // Link this outbridge to all inside edges of this specific RBS
             insideEdges.forEach((ie) => rbsResetMap.get(edgeKey).add(ie));
           }
         }
       });
     }
   });
-  // ------------------------------------------------
+
+  // --- NEW: GLOBAL STATE REGISTRY TO PREVENT DUPLICATE INTERLEAVINGS ---
+  const stateRegistry = new Map();
+
+  function getStateSignature(v, visitsMap, choices) {
+    const keys = Object.keys(visitsMap).sort();
+    const visitStr = keys.map(k => `${k}:${visitsMap[k]}`).join("|");
+    const choiceStr = JSON.stringify(choices || {});
+    // Signature includes visits, meaning LOOPS will naturally bypass this and duplicate correctly!
+    return `${v}::${visitStr}::${choiceStr}`;
+  }
 
   // START ALGORITHM FOR GENERATING TRAVERSAL TREES
   let i = 1;
@@ -182,7 +184,6 @@ export function generateTraversalTreeFromJSON(
         const currentVisits = nodeX.edgeVisits[edgeKey] || 0;
         const maxVisits = edge.L !== undefined ? edge.L : 1;
 
-        // Strictly respect the L-attributes
         if (currentVisits >= maxVisits) continue;
 
         let newEdgeVisits = {
@@ -190,15 +191,24 @@ export function generateTraversalTreeFromJSON(
           [edgeKey]: currentVisits + 1,
         };
 
-        // --- NEW: RBS RESET MECHANIC ---
-        // If this edge is an outbridge, reset the L-values for the RBS's internal edges
         if (rbsResetMap.has(edgeKey)) {
           const edgesToReset = rbsResetMap.get(edgeKey);
           edgesToReset.forEach((innerEdgeKey) => {
-            newEdgeVisits[innerEdgeKey] = 0; // Restore capacity
+            newEdgeVisits[innerEdgeKey] = 0; 
           });
         }
-        // -------------------------------
+
+        // --- STATE DEDUPLICATION CHECK ---
+        let sig = getStateSignature(yj, newEdgeVisits, nodeX.choices);
+        if (stateRegistry.has(sig)) {
+          let existingNode = stateRegistry.get(sig);
+          if (!existingNode.parents.find(p => p.id === nodeX.id)) {
+            existingNode.parents.push(nodeX);
+            nodeX.children.push(existingNode);
+          }
+          progressedThisIteration = true;
+          continue; // Block duplicate branch creation
+        }
 
         let cVal = edge.C === "" || edge.C === "ϵ" ? EPS : edge.C;
         let newS = [...nodeX.S, cVal];
@@ -217,6 +227,8 @@ export function generateTraversalTreeFromJSON(
           triggerC: cVal,
           choices: { ...nodeX.choices },
         };
+
+        stateRegistry.set(sig, newNode); // Register the new unique state
 
         if (isAncestor) {
           if (cVal === EPS && edge.L === undefined) {
@@ -303,24 +315,36 @@ export function generateTraversalTreeFromJSON(
               if (joinType === "AND") {
                 let conditions = pair.map((n) => n.triggerC);
                 let groupedC = `(${conditions.join(",")})`;
-                createMergedNode(
-                  pair,
-                  joinV,
-                  [...basePrefix, groupedC],
-                  mergedChoices,
-                );
+
+                // MERGE AND-JOINS TO PREVENT EXPLOSION
+                let tempVisits = {};
+                for (let n of pair) {
+                  for (let [edge, count] of Object.entries(n.edgeVisits || {})) {
+                    tempVisits[edge] = Math.max(tempVisits[edge] || 0, count);
+                  }
+                }
+                const sig = getStateSignature(joinV, tempVisits, mergedChoices);
+
+                if (stateRegistry.has(sig)) {
+                  let existingNode = stateRegistry.get(sig);
+                  for (let p of pair) {
+                    if (!existingNode.parents.find(ep => ep.id === p.id)) {
+                      existingNode.parents.push(p);
+                      p.children.push(existingNode);
+                    }
+                  }
+                } else {
+                  let mergedNode = createMergedNode(pair, joinV, [...basePrefix, groupedC], mergedChoices);
+                  stateRegistry.set(sig, mergedNode);
+                }
+
               } else if (joinType === "MIX") {
                 let nodeEps = pair.find((n) => n.triggerC === EPS);
                 let nodeC = pair.find((n) => n.triggerC !== EPS);
 
                 if (nodeEps && nodeC) {
                   let mixAndChoices = { ...mergedChoices, [joinV]: "AND" };
-                  createMergedNode(
-                    pair,
-                    joinV,
-                    [...basePrefix, `(${EPS},${nodeC.triggerC})`],
-                    mixAndChoices,
-                  );
+                  createMergedNode(pair, joinV, [...basePrefix, `(${EPS},${nodeC.triggerC})`], mixAndChoices);
 
                   let mixOrChoices = { ...nodeC.choices, [joinV]: "OR" };
                   createMergedNode([nodeC], joinV, [...nodeC.S], mixOrChoices);
@@ -355,8 +379,6 @@ export function generateTraversalTreeFromJSON(
       v: joinV,
       S: mergedS,
       parents: parents,
-      // NEW: Tell the renderer that all parents after the first one are "cross-links"
-      crossParents: parents.slice(1).map((p) => p.id),
       children: [],
       isPending: false,
       isCycleTerminal: false,
@@ -369,21 +391,18 @@ export function generateTraversalTreeFromJSON(
 
     for (let parent of parents) parent.children.push(mergedNode);
     allNodes.push(mergedNode);
+    return mergedNode;
   }
 
-  // --- PHASE 4: EXTRACT UNIQUE MAXIMAL PATHS ---
   console.log("--- FINAL SPANNING TREE PATHS ---");
 
-  // 1. Filter: Keep only the nodes that successfully reached the Sink
   let successfulPaths = allNodes.filter(
     (n) => n.children.length === 0 && !n.isPending && sink.includes(n.v),
   );
 
-  // 2. Group by "Path Family" to extract maximal loops
   let pathFamilies = new Map();
 
   successfulPaths.forEach((n) => {
-    // Sort the unique vertices so topological route variations match the same family
     const routeSignature = [...new Set(n.path)].sort().join("|");
     const choiceKey = JSON.stringify(n.choices || {});
     const familyKey = `${choiceKey}|${routeSignature}`;
@@ -394,7 +413,6 @@ export function generateTraversalTreeFromJSON(
     pathFamilies.get(familyKey).push(n);
   });
 
-  // 3. For each family, keep ONLY the one with the longest S (the maximal loop execution)
   let maximalPaths = [];
   for (let familyNodes of pathFamilies.values()) {
     let maxNode = familyNodes[0];
@@ -405,48 +423,50 @@ export function generateTraversalTreeFromJSON(
     }
     maximalPaths.push(maxNode);
   }
-  // 4. Final De-duplication: Store the actual Node (not just the string)
+
   let uniqueMaximalPaths = new Map();
   maximalPaths.forEach((n) => {
     const sString = n.S.join(",");
     if (!uniqueMaximalPaths.has(sString)) {
-      uniqueMaximalPaths.set(sString, n); // <--- Store the whole node
+      uniqueMaximalPaths.set(sString, n); 
     }
   });
 
-  // 5. Output to Console
   uniqueMaximalPaths.forEach((node, pathS) => {
     console.log(`S([${pathS}])`);
   });
 
-  // --- NEW: PHASE 5 - PRUNE DEAD-END BRANCHES FOR RENDERER ---
-  // Backtrack from the 4 successful paths and keep ONLY their ancestors
+  // --- PHASE 5: MAP DAG CAREFULLY TO FIX THE 'TIME' BUG ---
   const survivingNodes = new Set();
+  const survivingEdges = new Set();
   const queue = Array.from(uniqueMaximalPaths.values());
 
-  while (queue.length > 0) {
-    const curr = queue.shift();
-    if (!survivingNodes.has(curr)) {
-      survivingNodes.add(curr);
-      if (curr.parents) {
-        curr.parents.forEach((p) => queue.push(p));
-      }
+  // Deep recursive trace backwards to build the perfect DAG map
+  function traceBack(node) {
+    if (!survivingNodes.has(node.id)) {
+      survivingNodes.add(node.id);
+    }
+    if (node.parents) {
+      node.parents.forEach((p) => {
+        const edgeKey = `${p.id}->${node.id}`;
+        if (!survivingEdges.has(edgeKey)) {
+          survivingEdges.add(edgeKey);
+          traceBack(p); 
+        }
+      });
     }
   }
 
-  // Filter out the noise and fix references
-  allNodes = allNodes.filter((n) => survivingNodes.has(n));
-  allNodes.forEach((n) => {
-    n.children = n.children.filter((c) => survivingNodes.has(c));
+  queue.forEach((leaf) => traceBack(leaf));
 
-    allNodes.forEach((n) => {
-      if (!n.parents || n.parents.length === 0) {
-        n.time = 0;
-      } else {
-        const maxParentTime = Math.max(...n.parents.map((p) => p.time ?? 0));
-        n.time = maxParentTime + 1;
-      }
-    });
+  // Purge dead nodes
+  allNodes = allNodes.filter((n) => survivingNodes.has(n.id));
+  
+  // Re-link surviving edges and strictly assign time based on string length
+  allNodes.forEach((n) => {
+    n.parents = n.parents.filter((p) => survivingEdges.has(`${p.id}->${n.id}`));
+    n.children = n.children.filter((c) => survivingEdges.has(`${n.id}->${c.id}`));
+    n.time = n.S.length - 1; // <--- Perfectly sets X-axis placement safely!
   });
 
   return {
