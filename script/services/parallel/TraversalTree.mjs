@@ -9,9 +9,15 @@ const edgeKey = (e, idx) => `${e.from}->${e.to}#${idx}`;
 // Utility & Merge Logic
 // ==========================================
 
-function link(parent, child) {
+function link(parent, child, isCrossLink = false) {
   if (!child.parents.includes(parent)) child.parents.push(parent);
   if (!parent.children.includes(child)) parent.children.push(child);
+  
+  // Flag this specific parent as a cross-link so the UI knows to draw it vertically
+  if (isCrossLink) {
+    if (!child.crossParents) child.crossParents = [];
+    child.crossParents.push(parent.id);
+  }
 }
 
 function isUnconstrained(e, inc, T) {
@@ -214,7 +220,7 @@ export function generateTraversalTreeFromJSON(input, { sourceId = null } = {}) {
                     mergedT,
                   );
                   link(p.node, zEps);
-                  link(node, zEps); // FIXED: Link the sigma branch to the joined node
+                  link(node, zEps, true); // FLAG AS CROSS-LINK
                 }
               }
             } else {
@@ -240,7 +246,7 @@ export function generateTraversalTreeFromJSON(input, { sourceId = null } = {}) {
                     mergedT,
                   );
                   link(p.node, zEps);
-                  link(s.node, zEps); // FIXED: Link the sigma branch to the joined node
+                  link(s.node, zEps, true); // FLAG AS CROSS-LINK
                 }
               }
             }

@@ -80,37 +80,36 @@ export function generateTraversalTreeFromJSON(
   const joinTypes = classifyJoin(inc);
 
   // START ALGORITHM FOR GENERATING TRAVERSAL TREES
-
+  // START ALGORITHM FOR GENERATING TRAVERSAL TREES
   let i = 1;
-  let ancestors = new Set();
   let allNodes = [];
 
   const sourceVId = source[0];
-
   let rootNode = {
-    id: `node_${i++}`,
+    id: `T_${i++}`,
     v: sourceVId,
     S: [0],
     parents: [],
     children: [],
     isPending: false,
+    isCycleTerminal: false,
     edgeVisits: {},
     path: [sourceVId],
+    triggerEdge: null,
+    triggerC: null,
+    choices: {}, // <--- NEW: Tracks the "universe" this path belongs to
   };
 
   allNodes.push(rootNode);
-  console.log(allNodes);
 
-  // --- COMBINED TRAVERSAL LOOP ---
   let traversalActive = true;
 
   while (traversalActive) {
-    // 1. Find all active leaf nodes (Ignore pending nodes and cycle terminals)
+    // --- PHASE 2: FORWARD TRAVERSAL ---
     let X = allNodes.filter(
       (n) => n.children?.length === 0 && !n.isPending && !n.isCycleTerminal,
     );
 
-    // 2. Termination Check: Are we strictly at the sink?
     if (X.length === 1 && X[0].v === sink[0]) {
       console.log("Reached the sink successfully.");
       break;
@@ -124,75 +123,36 @@ export function generateTraversalTreeFromJSON(
       for (let edge of outgoingEdges) {
         const yj = edge.to;
         const edgeKey = `${nodeX.v}->${yj}`;
-        const currentVisits = nodeX.edgeVisits[edgeKey] || 0;
 
-        // 1. Check if yj is an ancestor IN THE CURRENT PATH
         const isAncestor = nodeX.path.includes(yj);
+        const currentVisits = nodeX.edgeVisits[edgeKey] || 0;
+        const maxVisits = edge.L !== undefined ? edge.L : 1;
+        if (currentVisits >= maxVisits) continue;
 
-        if (isAncestor) {
-          // --- CYCLE EXHAUSTION CHECK ---
-          const cycleStartIndex = nodeX.path.indexOf(yj);
-          const cycleVertices = nodeX.path.slice(cycleStartIndex);
-          cycleVertices.push(yj); // Close the loop
-
-          let cycleExhausted = false;
-
-          // Check every edge in the prospective cycle
-          for (let k = 0; k < cycleVertices.length - 1; k++) {
-            const fromV = cycleVertices[k];
-            const toV = cycleVertices[k + 1];
-            const cycleEdgeKey = `${fromV}->${toV}`;
-
-            // Retrieve the L-value directly (fallback to 1 if undefined)
-            const cycleEdgeDef = out.get(fromV)?.find((e) => e.to === toV);
-            const lVal = cycleEdgeDef?.L !== undefined ? cycleEdgeDef.L : 1;
-
-            const visits = nodeX.edgeVisits[cycleEdgeKey] || 0;
-
-            // If ANY arc in the cycle has hit its integer limit, block the backward arc!
-            if (visits >= lVal) {
-              console.log(
-                `Cycle blocked at ${edgeKey}: Arc ${cycleEdgeKey} is exhausted (Visits: ${visits}, Max L: ${lVal}).`,
-              );
-              cycleExhausted = true;
-              break;
-            }
-          }
-
-          // If the cycle is blocked, skip this backward arc entirely
-          if (cycleExhausted) {
-            continue;
-          }
-        } else {
-          // --- STANDARD FORWARD ARC LIMIT ---
-          const maxVisits = edge.L !== undefined ? edge.L : 1;
-          if (currentVisits >= maxVisits) {
-            continue;
-          }
-        }
-
-        // --- UPDATE PATH AND VISITS FOR THE NEW NODE ---
-        let newEdgeVisits = { ...nodeX.edgeVisits };
-        newEdgeVisits[edgeKey] = currentVisits + 1;
-
-        // Clone the parent's S array and append this edge's Condition (C value)
-        let newS = [...(nodeX.S || [])];
-        newS.push(edge.C); // Appends 'ϵ' or the specific condition string
+        let newEdgeVisits = {
+          ...nodeX.edgeVisits,
+          [edgeKey]: currentVisits + 1,
+        };
+        let cVal = edge.C === "" || edge.C === "ϵ" ? EPS : edge.C;
+        let newS = [...nodeX.S, cVal];
 
         let newNode = {
-          id: `node_${i}`,
+          id: `T_${i++}`,
           v: yj,
-          S: newS, // Use the updated condition path
+          S: newS,
           parents: [nodeX],
           children: [],
           isPending: false,
+          isCycleTerminal: false,
           edgeVisits: newEdgeVisits,
           path: [...nodeX.path, yj],
+          triggerEdge: edgeKey,
+          triggerC: cVal,
+          choices: { ...nodeX.choices }, // Inherit universe choices
         };
 
-        // --- CYCLE APPENDING (Lines 15-27) & FORWARD APPENDING (Lines 47-66) ---
         if (isAncestor) {
-          if (edge.C === "ϵ" || edge.C === "EPS") {
+          if (cVal === EPS) {
             newNode.S.push(`cycle_resolved_${yj}`);
             newNode.isCycleTerminal = true;
             nodeX.children.push(newNode);
@@ -200,92 +160,166 @@ export function generateTraversalTreeFromJSON(
           } else {
             nodeX.children.push(newNode);
             allNodes.push(newNode);
-            if (joinTypes.get(yj) === "AND" || joinTypes.get(yj) === "MIX") {
+            const joinType = joinTypes.get(yj);
+            if (joinType === "AND" || joinType === "MIX")
               newNode.isPending = true;
-            }
           }
         } else {
           nodeX.children.push(newNode);
           allNodes.push(newNode);
-
           const joinType = joinTypes.get(yj);
-          if (joinType === "AND" || joinType === "MIX") {
+          if (joinType === "AND" || joinType === "MIX")
             newNode.isPending = true;
-          }
         }
-
-        i++;
         progressedThisIteration = true;
       }
-      ancestors.add(nodeX.v);
     }
 
+    // --- PHASE 3: RESOLVE PENDING JOINS ---
     if (!progressedThisIteration) {
-      traversalActive = false;
-    }
-
-    if (!progressedThisIteration) {
-      // Find all nodes currently waiting at a join
       let pendingNodes = allNodes.filter((n) => n.isPending);
 
       if (pendingNodes.length > 0) {
-        // Group them by their vertex 'v' (the join component)
         let pendingByVertex = new Map();
         for (let n of pendingNodes) {
           if (!pendingByVertex.has(n.v)) pendingByVertex.set(n.v, []);
           pendingByVertex.get(n.v).push(n);
         }
 
-        for (let [joinV, nodesToMerge] of pendingByVertex.entries()) {
-          // 1. Combine the S sets (Union of conditions from all parallel branches)
-          let mergedS = [...new Set(nodesToMerge.flatMap((n) => n.S || []))];
+        for (let [joinV, nodesAtJoin] of pendingByVertex.entries()) {
+          const requiredIncomingCount = inc.get(joinV).length;
 
-          // 2. Combine edge visits (Take the max of each edge visited to respect loops safely)
-          let mergedVisits = {};
-          for (let n of nodesToMerge) {
-            for (let [edge, count] of Object.entries(n.edgeVisits || {})) {
-              mergedVisits[edge] = Math.max(mergedVisits[edge] || 0, count);
+          let nodesByEdge = new Map();
+          for (let n of nodesAtJoin) {
+            if (!nodesByEdge.has(n.triggerEdge))
+              nodesByEdge.set(n.triggerEdge, []);
+            nodesByEdge.get(n.triggerEdge).push(n);
+          }
+
+          if (nodesByEdge.size === requiredIncomingCount) {
+            const branchArrays = Array.from(nodesByEdge.values());
+            const combinations = branchArrays.reduce(
+              (a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())),
+              [[]],
+            );
+
+            // NEW: Filter out combinations from colliding universes!
+            const isValidCombination = (pair) => {
+              let mergedChoices = {};
+              for (let n of pair) {
+                for (let [nodeV, choiceVal] of Object.entries(n.choices)) {
+                  if (
+                    mergedChoices[nodeV] &&
+                    mergedChoices[nodeV] !== choiceVal
+                  )
+                    return false;
+                  mergedChoices[nodeV] = choiceVal;
+                }
+              }
+              return true;
+            };
+
+            let validCombinations = combinations.filter(isValidCombination);
+            let mergedNodesThisIteration = new Set();
+
+            for (let pair of validCombinations) {
+              const joinType = joinTypes.get(joinV);
+
+              let longestNode = pair[0];
+              for (let n of pair) {
+                if (n.S.length > longestNode.S.length) longestNode = n;
+              }
+              let basePrefix = longestNode.S.slice(0, -1);
+
+              let mergedChoices = {};
+              for (let n of pair) Object.assign(mergedChoices, n.choices);
+
+              if (joinType === "AND") {
+                let conditions = pair.map((n) => n.triggerC);
+                let groupedC = `(${conditions.join(",")})`;
+
+                createMergedNode(
+                  pair,
+                  joinV,
+                  [...basePrefix, groupedC],
+                  mergedChoices,
+                );
+              } else if (joinType === "MIX") {
+                let nodeEps = pair.find((n) => n.triggerC === EPS);
+                let nodeC = pair.find((n) => n.triggerC !== EPS);
+
+                if (nodeEps && nodeC) {
+                  // Behavior 1: MIX/AND
+                  let mixAndChoices = { ...mergedChoices, [joinV]: "AND" };
+                  createMergedNode(
+                    pair,
+                    joinV,
+                    [...basePrefix, `(${EPS},${nodeC.triggerC})`],
+                    mixAndChoices,
+                  );
+
+                  // Behavior 2: MIX/OR
+                  let mixOrChoices = { ...nodeC.choices, [joinV]: "OR" };
+                  createMergedNode([nodeC], joinV, [...nodeC.S], mixOrChoices);
+                }
+              }
+
+              // Track which nodes successfully merged so we can unlock them
+              for (let n of pair) mergedNodesThisIteration.add(n);
             }
+
+            for (let n of mergedNodesThisIteration) {
+              n.isPending = false;
+            }
+            progressedThisIteration = true;
           }
-
-          // 3. Combine paths
-          let mergedPath = [
-            ...new Set(nodesToMerge.flatMap((n) => n.path || [])),
-          ];
-
-          // 4. Create the Merged Node!
-          let mergedNode = {
-            id: `node_${i}`,
-            v: joinV,
-            S: mergedS,
-            parents: nodesToMerge, // Notice it has MULTIPLE parents now!
-            children: [],
-            isPending: false, // Unlocked and ready to traverse forward
-            isCycleTerminal: false,
-            edgeVisits: mergedVisits,
-            path: mergedPath,
-          };
-
-          // 5. Update relationships: link the old branches to this new merged node
-          for (let parent of nodesToMerge) {
-            parent.children.push(mergedNode);
-            parent.isPending = false; // Remove their pending status
-          }
-
-          allNodes.push(mergedNode);
-          i++;
-          progressedThisIteration = true; // We made progress, keep the while-loop alive!
         }
+      }
+
+      if (!progressedThisIteration) {
+        traversalActive = false;
       }
     }
   }
 
-  console.log("Final allNodes:", allNodes);
-  console.log(`Final allNodes: (${allNodes.length})`, allNodes);
+  function createMergedNode(parents, joinV, mergedS, choices) {
+    let mergedVisits = {};
+    for (let n of parents) {
+      for (let [edge, count] of Object.entries(n.edgeVisits || {})) {
+        mergedVisits[edge] = Math.max(mergedVisits[edge] || 0, count);
+      }
+    }
+    let mergedPath = [...new Set(parents.flatMap((n) => n.path || []))];
 
-  console.log("--- NODE PATHS (CONDITIONS) ---");
-  allNodes.forEach((n) => {
-    const formattedS = `S([${(n.S || []).join(", ")}])`;
-    console.log(`${n.id} (${n.v}): ${formattedS}`);
+    let mergedNode = {
+      id: `T_${i++}`,
+      v: joinV,
+      S: mergedS,
+      parents: parents,
+      children: [],
+      isPending: false,
+      isCycleTerminal: false,
+      edgeVisits: mergedVisits,
+      path: mergedPath,
+      triggerEdge: null,
+      triggerC: null,
+      choices: choices, // Apply the new universe tracking
+    };
+
+    for (let parent of parents) {
+      parent.children.push(mergedNode);
+    }
+    allNodes.push(mergedNode);
+  }
+
+  // --- PHASE 4: EXTRACT FINAL PATHS ---
+  console.log("--- FINAL SPANNING TREE PATHS ---");
+  let leafNodes = allNodes.filter(
+    (n) => n.children.length === 0 && !n.isPending,
+  ); // Ignore stalled invalid universes
+
+  leafNodes.forEach((n) => {
+    const formattedS = `S([${n.S.join(",")}])`;
+    console.log(formattedS);
   });
 }

@@ -3,10 +3,10 @@ import { generateUniqueID } from "../../utils.mjs";
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Layout Constants
-const LEFT_PAD = 60;
+const LEFT_PAD = 80; 
 const TOP_PAD = 60;
-const X_GAP = 320; // Horizontal spacing between levels
-const Y_GAP = 90;  // Vertical spacing between leaves
+const X_GAP = 320; 
+const Y_GAP = 90;  
 const BOX_PAD_X = 10;
 const BOX_PAD_Y = 8;
 
@@ -64,13 +64,13 @@ export default class TraversalTreeViewerManager {
 
     this.#clearSVG();
 
-    if (!res || res === 0) {
-      this.#drawMessage("No traversal tree generated.");
-      return;
-    }
+    // if (!res || res === 0) {
+    //   this.#drawMessage("No traversal tree generated.");
+    //   return;
+    // }
 
-    this.#renderResults(res);
-    this.#renderTree(res);
+    // this.#renderResults(res);
+    // this.#renderTree(res);
   }
 
   #drawMessage(text) {
@@ -87,34 +87,11 @@ export default class TraversalTreeViewerManager {
     const make = (tag) => document.createElementNS(SVG_NS, tag);
     const sToString = (S) => `S([${(S ?? []).join(",")}])`;
 
-    // ---------- 1. Compute Depths (Longest Path for X-Axis) ----------
-    const depthOf = new Map();
-    res.allNodes.forEach((n) => depthOf.set(n.id, 0));
-
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const n of res.allNodes) {
-        const current = depthOf.get(n.id);
-        let maxParentDepth = -1;
-        for (const p of n.parents ?? []) {
-          const pDepth = depthOf.get(p.id);
-          if (pDepth > maxParentDepth) maxParentDepth = pDepth;
-        }
-        if (maxParentDepth + 1 > current) {
-          depthOf.set(n.id, maxParentDepth + 1);
-          changed = true;
-        }
-      }
-    }
-
-    // ---------- 2. Build Spanning Tree to avoid DAG double-counting ----------
+    // ---------- 1. Build Spanning Tree ----------
     const childrenOf = new Map();
     res.allNodes.forEach((n) => childrenOf.set(n.id, []));
 
-    const sortedNodes = [...res.allNodes].sort(
-      (a, b) => depthOf.get(a.id) - depthOf.get(b.id)
-    );
+    const sortedNodes = [...res.allNodes].sort((a, b) => b.time - a.time);
 
     const parentOf = new Map();
     for (const n of sortedNodes) {
@@ -126,7 +103,7 @@ export default class TraversalTreeViewerManager {
       }
     }
 
-    // ---------- 3. Compute Subtree Widths (Leaf Counts) ----------
+    // ---------- 2. Compute Subtree Widths ----------
     const leafCount = new Map();
     function calcLeaves(node) {
       const children = childrenOf.get(node.id);
@@ -143,15 +120,12 @@ export default class TraversalTreeViewerManager {
     const roots = res.allNodes.filter((n) => !n.parents || n.parents.length === 0);
     roots.forEach((r) => calcLeaves(r));
 
-    // ---------- 4. Assign Grid Positions recursively (Y-Axis) ----------
+    // ---------- 3. Assign Grid Positions ----------
     const layoutPos = new Map();
 
     function assignPos(node, yStart) {
-      const depth = depthOf.get(node.id);
-      const x = LEFT_PAD + depth * X_GAP;
+      const x = LEFT_PAD + node.time * X_GAP;
       const myLeaves = leafCount.get(node.id);
-
-      // Center the node vertically in its allocated leaf-span
       const myHeight = myLeaves * Y_GAP;
       const y = yStart + myHeight / 2 - Y_GAP / 2;
 
@@ -160,7 +134,7 @@ export default class TraversalTreeViewerManager {
       let currY = yStart;
       for (const c of childrenOf.get(node.id)) {
         assignPos(c, currY);
-        currY += leafCount.get(c.id) * Y_GAP; // Shift down for next sibling
+        currY += leafCount.get(c.id) * Y_GAP; 
       }
     }
 
@@ -170,13 +144,15 @@ export default class TraversalTreeViewerManager {
       currentRootY += leafCount.get(r.id) * Y_GAP;
     }
 
-    // ---------- 5. SVG Group Layers ----------
+    // ---------- 4. SVG Layers ----------
     const edgeGroup = make("g");
+    const syncGroup = make("g"); 
     const nodeGroup = make("g");
     this.#svg.appendChild(edgeGroup);
+    this.#svg.appendChild(syncGroup); 
     this.#svg.appendChild(nodeGroup);
 
-    // ---------- 6. SVG Drawing Helpers ----------
+    // ---------- 5. SVG Drawing Helpers ----------
     const drawBezierEdge = (x1, y1, x2, y2, timeLabel, opacity = "0.4") => {
       const path = make("path");
       const midX = (x1 + x2) / 2;
@@ -258,16 +234,16 @@ export default class TraversalTreeViewerManager {
       };
     };
 
-    // ---------- 7. Render Nodes & Capture Bounds ----------
+    // ---------- 6. Render Nodes & Capture Bounds ----------
     const finalPos = new Map();
 
     for (const n of res.allNodes) {
       const { x, y } = layoutPos.get(n.id);
       const dims = drawTextNode(x, y, n.v, n.S);
-      finalPos.set(n.id, { x, y, ...dims });
+      finalPos.set(n.id, { id: n.id, v: n.v, x, y, ...dims });
     }
 
-    // ---------- 8. Render Edges with Time Labels ----------
+    // ---------- 7. Render Edges (Hiding Cross-Links) ----------
     for (const n of res.allNodes) {
       const to = finalPos.get(n.id);
       if (!to) continue;
@@ -276,11 +252,84 @@ export default class TraversalTreeViewerManager {
         const from = finalPos.get(p.id);
         if (!from) continue;
 
+        // Turn the arc into a vertical line by skipping the Bezier!
+        if (n.crossParents && n.crossParents.includes(p.id)) {
+          continue; 
+        }
+
         drawBezierEdge(from.xOut, from.yMid, to.xIn, to.yMid, n.time);
       }
     }
 
-    // ---------- 9. Dynamically Resize SVG for Scrolling ----------
+    // ---------- 8. Draw Vertical Bracket Lines ----------
+    const nodesByColAndV = new Map();
+
+    for (const n of res.allNodes) {
+      const pos = finalPos.get(n.id);
+      if (!pos) continue;
+
+      const key = `${pos.x}_${n.v}`;
+      if (!nodesByColAndV.has(key)) nodesByColAndV.set(key, []);
+      nodesByColAndV.get(key).push(n);
+    }
+
+    for (const nodes of nodesByColAndV.values()) {
+      if (nodes.length <= 1) continue;
+
+      // Group nodes that share an intersecting parent
+      // Since we kept the cross-link in `parents`, MIX joins perfectly cluster together!
+      const clusters = [];
+      for (const n of nodes) {
+        let added = false;
+        for (const cluster of clusters) {
+          const sharesParent = cluster.some(cn => 
+            n.parents.some(p => cn.parents.some(cp => cp.id === p.id))
+          );
+          if (sharesParent) {
+            cluster.push(n);
+            added = true;
+            break;
+          }
+        }
+        if (!added) clusters.push([n]);
+      }
+
+      for (const cluster of clusters) {
+        if (cluster.length > 1) {
+          cluster.sort((a, b) => finalPos.get(a.id).yMid - finalPos.get(b.id).yMid);
+
+          const minY = finalPos.get(cluster[0].id).yMid;
+          const maxY = finalPos.get(cluster[cluster.length - 1].id).yMid;
+          const lineX = finalPos.get(cluster[0].id).xIn - 12;
+
+          const vLine = make("line");
+          vLine.setAttribute("x1", String(lineX));
+          vLine.setAttribute("y1", String(minY));
+          vLine.setAttribute("x2", String(lineX));
+          vLine.setAttribute("y2", String(maxY));
+          vLine.setAttribute("stroke", "currentColor");
+          vLine.setAttribute("stroke-width", "2");
+          vLine.setAttribute("stroke-dasharray", "4 4");
+          vLine.setAttribute("opacity", "0.4");
+          
+          const capTop = make("line");
+          capTop.setAttribute("x1", String(lineX)); capTop.setAttribute("y1", String(minY));
+          capTop.setAttribute("x2", String(lineX + 6)); capTop.setAttribute("y2", String(minY));
+          capTop.setAttribute("stroke", "currentColor"); capTop.setAttribute("stroke-width", "2"); capTop.setAttribute("opacity", "0.4");
+
+          const capBottom = make("line");
+          capBottom.setAttribute("x1", String(lineX)); capBottom.setAttribute("y1", String(maxY));
+          capBottom.setAttribute("x2", String(lineX + 6)); capBottom.setAttribute("y2", String(maxY));
+          capBottom.setAttribute("stroke", "currentColor"); capBottom.setAttribute("stroke-width", "2"); capBottom.setAttribute("opacity", "0.4");
+
+          syncGroup.appendChild(vLine);
+          syncGroup.appendChild(capTop);
+          syncGroup.appendChild(capBottom);
+        }
+      }
+    }
+
+    // ---------- 9. Dynamically Resize SVG ----------
     let maxX = 0;
     let maxY = 0;
 
@@ -299,6 +348,7 @@ export default class TraversalTreeViewerManager {
     this.#svg.style.height = `${Math.max(maxY, clientHeight)}px`;
   }
 
+  // ... (Keep the rest of your class unmodified)
   #renderResults(res) {
     const parallelHost = this.#root.querySelector("[data-tt-parallel]");
     const nonParallelHost = this.#root.querySelector("[data-tt-nonparallel]");
