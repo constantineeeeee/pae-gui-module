@@ -12,6 +12,7 @@ import { Soundness } from './utils/soundness.js';
 import { GraphOperations } from './utils/graph-operations.js';
 import { processR2 } from './utils/create_r2.mjs';
 import { utils } from './utils/rdlt-utils.mjs';
+import { MASExtractor } from './utils/mas-extractor.js';
 
 function getInBridges(model, arcMap, vertexMap) {
     
@@ -77,7 +78,7 @@ function getOutBridges(model, arcMap, vertexMap) {
     return outBridges;
 }
 
-function mapGUIModelToSoundness(model, source, sink){
+export function mapGUIModelToSoundness(model, source, sink){
     const arcMap = buildArcMap(model.arcs);
     const vertexMap = buildVertexMap(model.components);
 
@@ -618,6 +619,73 @@ export function verifySoundness(model, source, sink, soundnessNotion) {
                         arcOverrides: arcOverrides
                     }
                 });
+
+                // ---------------- Maximal Activities contained in this MAS ----------------
+                // These are NOT additional MAS; these are activity-level realizations inside
+                // the MAS envelope (useful for impedance-freeness style checks / inspection).
+                try {
+                    const srcId = vizData?.source?.id;
+                    const snkId = vizData?.sink?.id;
+                    const masSource = mas.vertices.find(v => v.id === srcId);
+                    const masSink   = mas.vertices.find(v => v.id === snkId);
+
+                    if (masSource && masSink) {
+                        const maxActs = MASExtractor.extractMaximalActivitiesFromMAS(mas, masSource, masSink);
+
+                        maxActs.forEach((ma, maIdx) => {
+                            const maUIDs = graphToUIDs(ma);
+
+                            // arcOverrides: preserve displayed L/C for arcs present in the maximal activity
+                            const maArcOverrides = {};
+                            ma.edges.forEach(edge => {
+                                const fromUID = Object.keys(vertexMap).find(
+                                    key => vertexMap[key].identifier === edge.from.id
+                                );
+                                const toUID = Object.keys(vertexMap).find(
+                                    key => vertexMap[key].identifier === edge.to.id
+                                );
+                                if (fromUID && toUID) {
+                                    const arcKey = `${fromUID}, ${toUID}`;
+                                    const transformedArcMap = utils.transformArcMap(arcMap);
+                                    const candidates = transformedArcMap[arcKey];
+                                    if (candidates && candidates.length > 0) {
+                                        const arcUID = candidates[0].uid;
+                                        const originalArc = arcMap[arcUID];
+                                        if (originalArc) {
+                                            maArcOverrides[arcUID] = {
+                                                C: originalArc.C || "ϵ",
+                                                L: edge.maxTraversals
+                                            };
+                                        }
+                                    }
+                                }
+                            });
+
+                            lazyInstances.push({
+                                name: `Maximal Activity (MAS R1 – ${idx + 1}) – ${maIdx + 1}`,
+                                evaluation: {
+                                    conclusion: {
+                                        pass: true,
+                                        title: `Maximal Activity – ${maIdx + 1}`,
+                                        description: `One maximal activity structure realizable inside MAS R1 – ${idx + 1}.`
+                                    },
+                                    criteria: [],
+                                    violating:        { arcs: [], vertices: [] },
+                                    violatingRemarks: { arcs: {},  vertices: {} }
+                                },
+                                model: maUIDs,
+                                options: {
+                                    suppressRBS: true,
+                                    forceControllerType: true,
+                                    useModelStyling: true,
+                                    arcOverrides: maArcOverrides
+                                }
+                            });
+                        });
+                    }
+                } catch (err) {
+                    console.warn("[WARN] Failed to derive maximal activities from MAS:", err);
+                }
             });
         }
         if (vizData.masR2 && vizData.masR2.length > 0) {

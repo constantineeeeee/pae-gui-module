@@ -43,13 +43,217 @@ export class MASExtractor {
     }
 
     /**
+     * Extract maximal activities (as Graph structures) that are contained inside a MAS.
+     *
+     * MAS is a maximal structural envelope; maximal activities are concrete structural
+     * realizations inside that envelope.
+     *
+     * Strategy:
+     *  1) Enumerate minimal contraction structures WITHOUT AND-join merging.
+     *  2) If the sink is an AND-join (>=2 distinct non-ε constraints on incoming arcs),
+     *     form maximal activities by taking one minimal structure per required incoming
+     *     arc and unioning them (cartesian product).
+     *  3) Otherwise, each minimal structure corresponds to a maximal activity structure.
+     *
+     * @param {Graph} rdlt - The graph to enumerate on (typically the MAS graph).
+     * @param {Vertex} source
+     * @param {Vertex} sink
+     * @returns {Array<Graph>}
+     */
+    static extractMaximalActivitiesFromMAS(rdlt, source, sink) {
+        const rawMin = this.extractMinimalContractionStructures(rdlt, source, sink, { mergeAndJoins: false });
+        if (rawMin.length === 0) return [];
+
+        const incoming = (rdlt.edges || []).filter(e => e.to?.id === sink.id);
+        const nonEps = incoming.filter(e => (e.constraint ?? 'ϵ') !== 'ϵ');
+        const distinctConstraints = new Set(nonEps.map(e => e.constraint));
+
+        const finalize = (graphs) => {
+            // Ensure each activity is a connected, AND-join-closed subgraph.
+            const out = [];
+            for (const g of graphs) {
+                const closed = this.closeUnderAndJoins(rdlt, g, rawMin, source, sink);
+                out.push(closed);
+            }
+            return out;
+        };
+
+        if (distinctConstraints.size < 2) {
+            return finalize(rawMin.map(ms => this.buildGraphFromStructure(rdlt, ms)));
+        }
+
+        // required incoming arc keys (fromId|constraint)
+        const requiredKeys = [];
+        for (const e of incoming) {
+            const c = e.constraint ?? 'ϵ';
+            if (c === 'ϵ') continue;
+            const key = `${e.from.id}|${c}`;
+            if (!requiredKeys.includes(key)) requiredKeys.push(key);
+        }
+
+        const structuresByKey = new Map();
+        for (const key of requiredKeys) structuresByKey.set(key, []);
+
+        for (const ms of rawMin) {
+            const lastToSink = (ms.edges || []).filter(e => e.to?.id === sink.id);
+            for (const e of lastToSink) {
+                const c = e.constraint ?? 'ϵ';
+                if (c === 'ϵ') continue;
+                const k = `${e.from.id}|${c}`;
+                if (structuresByKey.has(k)) structuresByKey.get(k).push(ms);
+            }
+        }
+
+        for (const key of requiredKeys) {
+            if ((structuresByKey.get(key) || []).length === 0) return [];
+        }
+
+        // cartesian product
+        const products = [];
+        const buildProduct = (idx, acc) => {
+            if (idx === requiredKeys.length) {
+                products.push(acc);
+                return;
+            }
+            const key = requiredKeys[idx];
+            const arr = structuresByKey.get(key) || [];
+            for (const ms of arr) buildProduct(idx + 1, [...acc, ms]);
+        };
+        buildProduct(0, []);
+
+        // union each product
+        const seen = new Set();
+        const maximalActivities = [];
+        for (const combo of products) {
+            const unionVertices = new Map();
+            const unionEdges = [];
+            const edgeKeys = new Set();
+
+            for (const ms of combo) {
+                (ms.vertices || []).forEach(v => unionVertices.set(v.id, v));
+                (ms.edges || []).forEach(e => {
+                    const key = `${e.from.id}->${e.to.id}|${e.constraint ?? 'ϵ'}|${e.maxTraversals ?? e.L ?? ''}`;
+                    if (!edgeKeys.has(key)) {
+                        edgeKeys.add(key);
+                        unionEdges.push(e);
+                    }
+                });
+            }
+
+            const sig = [
+                [...unionVertices.keys()].sort().join(','),
+                [...edgeKeys].sort().join(';')
+            ].join('||');
+            if (seen.has(sig)) continue;
+            seen.add(sig);
+
+            maximalActivities.push(this.buildMASGraph(rdlt, [...unionVertices.values()], unionEdges));
+        }
+
+        return finalize(maximalActivities);
+    }
+
+    /**
+     * Ensure an activity subgraph is closed under AND-join requirements.
+     *
+     * If an activity passes through an AND-join vertex j (i.e., it uses at least
+     * one outgoing edge from j), then it must include *all* required incoming
+     * arcs to j (non-looping, distinct non-ε constraints), including their parent
+     * paths from the source.
+     *
+     * We satisfy missing requirements by unioning in an appropriate minimal
+     * contraction structure from `rawMin` that contains the missing incoming arc.
+     */
+    static closeUnderAndJoins(rdlt, activityGraph, rawMin, source, sink) {
+        const { andJoins } = this.classifyJoinVertices(rdlt);
+        if (!andJoins || andJoins.length === 0) return activityGraph;
+
+        // Build quick lookup for edges in current activity.
+        const normC = (c) => {
+            const x = (c ?? '').toString().trim();
+            if (x === '' || x === 'ϵ' || x === 'ε' || x.toLowerCase() === 'epsilon') return 'ε';
+            return x;
+        };
+        const eKey = (e) => `${e.from.id}->${e.to.id}|${normC(e.constraint)}`;
+
+        const addStructure = (ms) => {
+            const vMap = new Map(activityGraph.vertices.map(v => [v.id, v]));
+            const edgeSet = new Set(activityGraph.edges.map(eKey));
+
+            for (const v of ms.vertices || []) {
+                if (!vMap.has(v.id)) {
+                    vMap.set(v.id, v);
+                }
+            }
+            for (const e of ms.edges || []) {
+                const k = eKey(e);
+                if (!edgeSet.has(k)) {
+                    edgeSet.add(k);
+                    activityGraph.edges.push(e);
+                }
+            }
+            activityGraph.vertices = [...vMap.values()];
+        };
+
+        // Iterate until stable.
+        let changed = true;
+        let guard = 0;
+        while (changed && guard++ < 25) {
+            changed = false;
+            const actEdgeKeys = new Set(activityGraph.edges.map(eKey));
+            const actHasOutFrom = (vid) => activityGraph.edges.some(e => e.from.id === vid);
+
+            for (const j of andJoins) {
+                // Skip the sink AND-join closure here; it's handled by the cartesian-product logic.
+                // (Still safe to run, but avoiding extra unions reduces duplication.)
+                if (j.id === sink.id) continue;
+
+                // Only enforce if activity actually *passes through* the join.
+                if (!activityGraph.vertices.some(v => v.id === j.id)) continue;
+                if (!actHasOutFrom(j.id)) continue;
+
+                const incomingAll = rdlt.edges.filter(e => e.to.id === j.id);
+                const incoming = incomingAll.filter(e => !this.isLoopingArc(rdlt, e));
+                if (incoming.length < 2) continue;
+
+                // Determine if this is an AND-join (no ε, >=2 distinct non-ε constraints).
+                const constraints = incoming.map(e => normC(e.constraint));
+                const hasEps = constraints.some(c => c === 'ε');
+                const nonEpsSet = new Set(constraints.filter(c => c !== 'ε'));
+                if (hasEps || nonEpsSet.size < 2) continue;
+
+                // Required incoming edges are all non-ε incoming edges.
+                const required = incoming
+                    .filter(e => normC(e.constraint) !== 'ε')
+                    .map(eKey);
+
+                for (const reqK of required) {
+                    if (actEdgeKeys.has(reqK)) continue;
+
+                    // Find a minimal structure that contains this required incoming edge.
+                    const ms = (rawMin || []).find(s => (s.edges || []).some(e => eKey(e) === reqK));
+                    if (ms) {
+                        addStructure(ms);
+                        changed = true;
+                        // refresh key set after modification
+                        break;
+                    }
+                }
+            }
+        }
+
+        return activityGraph;
+    }
+
+    /**
      * Extracts minimal contraction structures (MinCS) from the RDLT.
      * @param {Graph} rdlt - The RDLT graph.
      * @param {Vertex} source - The source vertex.
      * @param {Vertex} sink - The sink vertex.
      * @returns {Array<Object>} Array of minimal structures {vertices, edges}.
      */
-    static extractMinimalContractionStructures(rdlt, source, sink) {
+    static extractMinimalContractionStructures(rdlt, source, sink, opts = {}) {
+        const { mergeAndJoins = true } = opts;
         console.log("=== EXTRACTING MINIMAL CONTRACTION STRUCTURES ===");
         console.log("Source:", source.id, source);
         console.log("Sink:", sink.id, sink);
@@ -130,11 +334,17 @@ export class MASExtractor {
 
         console.log(`=== FOUND ${minimalStructures.length} MINIMAL STRUCTURES (before AND-join merging) ===`);
 
+        if (!mergeAndJoins) return minimalStructures;
+
         const mergedStructures = this.mergeANDJoinStructures(minimalStructures, rdlt);
 
         console.log(`=== AFTER AND-JOIN MERGING: ${mergedStructures.length} MINIMAL STRUCTURES ===`);
 
         return mergedStructures;
+    }
+
+    static buildGraphFromStructure(rdlt, structure) {
+        return this.buildMASGraph(rdlt, structure.vertices || [], structure.edges || []);
     }
 
     /**

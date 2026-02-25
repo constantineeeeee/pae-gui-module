@@ -1,4 +1,5 @@
 import { verifyFreeChoiceness } from "../../services/free-choiceness.mjs";
+import { verifyImpedanceFree } from "../../services/impedance-free.mjs";
 import { verifyWellHandledness } from "../../services/well-handledness.mjs";
 import { verifySoundness } from "../../services/soundness/soundness-service.mjs";
 import { Form } from "../../utils.mjs";
@@ -41,6 +42,7 @@ export default class VerificationsPanelManager {
       freeChoiceness: {},
       wellHandledness: {},
       soundness: {},
+      impedanceFree: {},
     },
   };
 
@@ -56,6 +58,7 @@ export default class VerificationsPanelManager {
     freeChoiceness: null,
     soundness: null,
     wellHandledness: null,
+    impedanceFree: null,
   };
 
   /**
@@ -74,6 +77,7 @@ export default class VerificationsPanelManager {
     this.#initializeFreeChoicenessSection();
     this.#initializeWellHandlednessSection();
     this.#initializeSoundnessSection();
+    this.#initializeImpedanceFreeSection();
   }
 
   #initializeForms() {
@@ -112,6 +116,17 @@ export default class VerificationsPanelManager {
     );
     this.#views.selectors.sinks.push(
       this.#forms.soundness.getFieldElement("sink")
+    );
+
+    // Impedance-free form elements
+    this.#forms.impedanceFree = new Form(
+      this.#views.sections.impedanceFree.root
+    ).setFieldNames(["source", "sink"]);
+    this.#views.selectors.sources.push(
+      this.#forms.impedanceFree.getFieldElement("source")
+    );
+    this.#views.selectors.sinks.push(
+      this.#forms.impedanceFree.getFieldElement("sink")
     );
   }
 
@@ -245,5 +260,31 @@ export default class VerificationsPanelManager {
         )
         .join("");
     }
+  }
+
+  #initializeImpedanceFreeSection() {
+    const sectionRoot = this.#rootElement.querySelector(
+      "[data-section-id='impedanceFree']"
+    );
+    const sectionViews = this.#views.sections.impedanceFree;
+
+    sectionViews.root = sectionRoot;
+    sectionViews.startButton = sectionRoot.querySelector(
+      "button[data-subaction='start']"
+    );
+    sectionViews.startButton.addEventListener("click", () => {
+      const { source, sink } = this.#forms.impedanceFree.getValues();
+      if (!source || !sink) return;
+
+      const modelSnapshot = this.context.managers.visualModel.makeCopy();
+      const simpleModel = modelSnapshot.toSimpleModel();
+
+      const result = verifyImpedanceFree(simpleModel, source, sink);
+
+      this.context.managers.workspace.showVerificationResults(
+        result,
+        modelSnapshot
+      );
+    });
   }
 }
