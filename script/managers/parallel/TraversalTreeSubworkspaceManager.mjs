@@ -9,7 +9,7 @@ const X_GAP = 320;
 const Y_GAP = 150;
 const BOX_PAD_X = 10;
 const BOX_PAD_Y = 8;
-var t = 1;
+var t;
 
 export default class TraversalTreeViewerManager {
   context;
@@ -20,6 +20,7 @@ export default class TraversalTreeViewerManager {
   #svg;
   #root;
   #drawnNodes = new Set();
+  #nodeBBoxes = new Map();
 
   constructor(context, visualModelSnapshot) {
     this.context = context;
@@ -132,7 +133,10 @@ export default class TraversalTreeViewerManager {
 
   #renderTree(res) {
     this.#drawnNodes = new Set();
+    this.#nodeBBoxes = new Map();
     const make = (tag) => document.createElementNS(SVG_NS, tag);
+
+    t = 1;
 
     const n = res.allNodes[0];
     console.log("node id:", n.id);
@@ -213,13 +217,19 @@ export default class TraversalTreeViewerManager {
         this.#renderDispatch(child, joinTypes, x + X_GAP, y, andJoinTargetY);
       }
     } else {
-      const topY = y;
-      const bottomY = y + (children.length - 1) * Y_GAP;
-      const midY = (topY + bottomY) / 2;
+      // const topY = y;
+      // const bottomY = y + (children.length - 1) * Y_GAP;
+      const totalHeight = (children.length - 1) * Y_GAP;
+      const existingBBox = this.#drawnNodes.has(node.id)
+      ? this.#nodeBBoxes.get(node.id)
+      : null;
+      
+      this.#renderSplit(node, children, x, y, t, existingBBox);
 
-      this.#renderSplit(node, children, x, y, t);
+      const startChildY = existingBBox ? y - totalHeight / 2 : y;
+      const midY = startChildY + totalHeight / 2;
 
-      let childY = y;
+      let childY = startChildY;
       for (const child of children) {
         // Pass midY down so branches know where to converge
         this.#renderDispatch(child, joinTypes, x + X_GAP, childY, midY);
@@ -265,7 +275,7 @@ export default class TraversalTreeViewerManager {
           //   midY,
           // );
 
-          this.#drawNodeOnly(joinNode, x + X_GAP * 3, midY);
+          const joinBBox = this.#drawNodeOnly(joinNode, x + X_GAP * 3, midY);
           this.#renderDispatch(joinNode, joinTypes, x + X_GAP * 3, midY);
         }
       }
@@ -370,7 +380,7 @@ export default class TraversalTreeViewerManager {
     const child = children[0];
 
     const fromX = x + parentBBox.width + BOX_PAD_X;
-    const fromY = y + (parentBBox.height / 2) - 10;
+    const fromY = y + parentBBox.height / 2 - 10;
 
     const childX = x + X_GAP;
 
@@ -378,7 +388,7 @@ export default class TraversalTreeViewerManager {
       const childBBox = drawNode(child, childX, y);
 
       const toX = childX;
-      const toY = y + (childBBox.height / 2) - 10;
+      const toY = y + childBBox.height / 2 - 10;
 
       // Draw edge (straight line for now)
       const path = make("path");
@@ -433,7 +443,7 @@ export default class TraversalTreeViewerManager {
     }
   }
 
-  #renderSplit(node, children, x, y, currentTime) {
+  #renderSplit(node, children, x, y, currentTime, preDrawnBBox = null) {
     const make = (tag) => document.createElementNS(SVG_NS, tag);
     const sToString = (S) => `S([${(S ?? []).join(",")}])`;
 
@@ -458,14 +468,32 @@ export default class TraversalTreeViewerManager {
     };
 
     const totalHeight = (children.length - 1) * Y_GAP;
-    const centeredY = y + totalHeight / 2;
-    const parentBBox = drawNode(node, x, centeredY);
+    // const centeredY = y + totalHeight / 2;
+
+    let parentBBox;
+    let fromY;
+    let startChildY;
+
+    if (preDrawnBBox) {
+      parentBBox = preDrawnBBox;
+      fromY = y + parentBBox.height / 2 - 10;
+      startChildY = y - totalHeight / 2;
+    } else {
+      const centeredY = y + totalHeight / 2;
+      parentBBox = drawNode(node, x, centeredY);
+      fromY = centeredY + parentBBox.height / 2 - 10;
+      startChildY = centeredY - totalHeight / 2;
+    }
+
+    // const parentBBox = preDrawnBBox ?? drawNode(node, x, centeredY);
 
     const fromX = x + parentBBox.width + BOX_PAD_X;
-    const fromY = centeredY + parentBBox.height / 2;
+
+    // const fromY = centeredY + parentBBox.height / 2;
 
     // Draw fan-out lines only — no child nodes drawn here
-    let childY = y;
+    let childY = startChildY;
+
     for (const child of children) {
       // Estimate toY based on childY — child node drawn later
       const toX = x + X_GAP;
@@ -485,7 +513,7 @@ export default class TraversalTreeViewerManager {
       text.setAttribute("font-weight", "700");
       text.setAttribute("fill", "#d11");
       text.setAttribute("text-anchor", "middle");
-      text.textContent = `t=${currentTime}`;
+      text.textContent = `t=${child.time}`;
       this.#svg.appendChild(text);
 
       t += 1;
@@ -569,6 +597,11 @@ export default class TraversalTreeViewerManager {
     g.appendChild(sub);
 
     this.#svg.appendChild(g);
-    return g.getBBox();
+
+    const bbox = g.getBBox();
+    this.#drawnNodes.add(node.id);
+    this.#nodeBBoxes.set(node.id, bbox);
+
+    return bbox;
   }
 }
