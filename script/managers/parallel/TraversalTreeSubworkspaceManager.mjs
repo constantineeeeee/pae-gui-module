@@ -187,10 +187,8 @@ export default class TraversalTreeViewerManager {
     this.#svg.style.width = `${Math.max(contentWidth, clientWidth)}px`;
     this.#svg.style.height = `${Math.max(contentHeight, clientHeight)}px`;
   }
-
-  #renderDispatch(node, joinTypes, x, y) {
+  #renderDispatch(node, joinTypes, x, y, andJoinTargetY = null) {
     const children = node.children ?? [];
-
     if (children.length === 0) return;
 
     if (children.length === 1) {
@@ -199,17 +197,20 @@ export default class TraversalTreeViewerManager {
 
       if (isJoin) {
         const joinType = joinTypes.get(child.v) ?? "OR";
-
-        if (joinType === "AND") {
-          this.#renderNormalTraverse(node, [child], x, y, child.time);
-          if (!this.#drawnNodes.has(child.id)) {
-            this.#drawnNodes.add(child.id);
-            this.#renderDispatch(child, joinTypes, x + X_GAP, y);
-          }
+        if (joinType === "AND" && andJoinTargetY !== null) {
+          this.#renderANDJoin(node, child, x, y, andJoinTargetY);
+        } else if (joinType === "OR" || joinType === "MIX") {
         }
       } else {
-        this.#renderNormalTraverse(node, [child], x, y, child.time);
-        this.#renderDispatch(child, joinTypes, x + X_GAP, y);
+        this.#renderNormalTraverse(
+          node,
+          [child],
+          x,
+          y,
+          child.time,
+          andJoinTargetY !== null,
+        );
+        this.#renderDispatch(child, joinTypes, x + X_GAP, y, andJoinTargetY);
       }
     } else {
       const topY = y;
@@ -220,30 +221,52 @@ export default class TraversalTreeViewerManager {
 
       let childY = y;
       for (const child of children) {
-        const grandchild = (child.children ?? [])[0];
-        const isANDJoin =
-          grandchild &&
-          (grandchild.parents ?? []).length > 1 &&
-          joinTypes.get(grandchild.v) === "AND";
-
-        if (isANDJoin) {
-          this.#renderANDJoin(child, grandchild, x + X_GAP, childY, midY);
-        } else {
-          this.#renderDispatch(child, joinTypes, x + X_GAP, childY);
-        }
-
+        // Pass midY down so branches know where to converge
+        this.#renderDispatch(child, joinTypes, x + X_GAP, childY, midY);
         childY += Y_GAP;
       }
 
+      // Find the AND join node and draw it once at midY
       const joinNode = children
         .flatMap((c) => c.children ?? [])
+        .flatMap((c) => c.children ?? [])
         .find((c) => (c.parents ?? []).length > 1);
+
+      // console.log(
+      //   "joinNode:",
+      //   joinNode?.v,
+      //   joinNode?.id,
+      //   "parents:",
+      //   joinNode?.parents?.length,
+      // );
+      // console.log(
+      //   "all grandchildren:",
+      //   children
+      //     .flatMap((c) => c.children ?? [])
+      //     .map((c) => `${c.id}(${c.v}) parents:${c.parents?.length}`),
+      // );
+      // console.log(
+      //   "deep grandchildren:",
+      //   children
+      //     .flatMap((c) => c.children ?? [])
+      //     .flatMap((c) => c.children ?? [])
+      //     .map((c) => `${c.id}(${c.v}) parents:${c.parents?.length}`),
+      // );
 
       if (joinNode && joinTypes.get(joinNode.v) === "AND") {
         if (!this.#drawnNodes.has(joinNode.id)) {
           this.#drawnNodes.add(joinNode.id);
-          this.#drawNodeOnly(joinNode, x + X_GAP * 2, midY);
-          this.#renderDispatch(joinNode, joinTypes, x + X_GAP * 2, midY);
+          // console.log(
+          //   "Drawing join node:",
+          //   joinNode.v,
+          //   "at x:",
+          //   x + X_GAP * 2,
+          //   "midY:",
+          //   midY,
+          // );
+
+          this.#drawNodeOnly(joinNode, x + X_GAP * 3, midY);
+          this.#renderDispatch(joinNode, joinTypes, x + X_GAP * 3, midY);
         }
       }
     }
@@ -313,7 +336,7 @@ export default class TraversalTreeViewerManager {
 
   // STRUCTURE TEMPLATES
 
-  #renderNormalTraverse(node, children, x, y, currentTime) {
+  #renderNormalTraverse(node, children, x, y, currentTime, skipChild = false) {
     const make = (tag) => document.createElementNS(SVG_NS, tag);
     const sToString = (S) => `S([${(S ?? []).join(",")}])`;
 
@@ -347,82 +370,43 @@ export default class TraversalTreeViewerManager {
     const child = children[0];
 
     const fromX = x + parentBBox.width + BOX_PAD_X;
-    const fromY = y + parentBBox.height / 2;
-
-    x += X_GAP;
-
-    const childBBox = drawNode(child, x, y);
-
-    const toX = x;
-    const toY = y + childBBox.height / 2;
-
-    // Draw edge (straight line for now)
-    const path = make("path");
-    const d = `M ${fromX} ${fromY} L ${toX} ${toY}`;
-    path.setAttribute("d", d);
-    path.setAttribute("stroke", "currentColor");
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke-width", "2.2");
-    this.#svg.appendChild(path);
-
-    const text = make("text");
-    const midX = (fromX + toX) / 2;
-    const midY = (fromY + toY) / 2;
-
-    text.setAttribute("x", String(midX));
-    text.setAttribute("y", String(midY - 10));
-    text.setAttribute("font-size", "12");
-    text.setAttribute("font-weight", "700");
-    text.setAttribute("fill", "#d11"); // red like the image
-    text.setAttribute("text-anchor", "middle");
-
-    text.textContent = `t=${currentTime}`;
-    t += 1;
-    this.#svg.appendChild(text);
-  }
-  #renderSplit(node, children, x, y, currentTime) {
-    const make = (tag) => document.createElementNS(SVG_NS, tag);
-    const sToString = (S) => `S([${(S ?? []).join(",")}])`;
-
-    const drawNode = (n, nx, ny) => {
-      const g = make("g");
-      g.setAttribute("transform", `translate(${nx},${ny})`);
-
-      const title = make("text");
-      title.setAttribute("font-size", "14");
-      title.setAttribute("font-weight", "600");
-      title.setAttribute("fill", "currentColor");
-      title.textContent = n.v;
-      g.appendChild(title);
-
-      const sub = make("text");
-      sub.setAttribute("y", "18");
-      sub.setAttribute("font-size", "12");
-      sub.setAttribute("opacity", "0.85");
-      sub.setAttribute("fill", "currentColor");
-      sub.textContent = sToString(n.S);
-      g.appendChild(sub);
-
-      this.#svg.appendChild(g);
-      return g.getBBox();
-    };
-
-    const totalHeight = (children.length - 1) * Y_GAP;
-
-    const centeredY = y + totalHeight / 2;
-    const parentBBox = drawNode(node, x, centeredY);
-
-    const fromX = x + parentBBox.width + BOX_PAD_X;
-    const fromY = centeredY + parentBBox.height / 2;
+    const fromY = y + (parentBBox.height / 2) - 10;
 
     const childX = x + X_GAP;
-    let childY = y;
 
-    for (const child of children) {
-      const childBBox = drawNode(child, childX, childY);
+    if (!skipChild) {
+      const childBBox = drawNode(child, childX, y);
 
       const toX = childX;
-      const toY = childY + childBBox.height / 2;
+      const toY = y + (childBBox.height / 2) - 10;
+
+      // Draw edge (straight line for now)
+      const path = make("path");
+      const d = `M ${fromX} ${fromY} L ${toX} ${toY}`;
+      path.setAttribute("d", d);
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke-width", "2.2");
+      this.#svg.appendChild(path);
+
+      const text = make("text");
+      const midX = (fromX + toX) / 2;
+      const midY = (fromY + toY) / 2;
+
+      text.setAttribute("x", String(midX));
+      text.setAttribute("y", String(midY - 10));
+      text.setAttribute("font-size", "12");
+      text.setAttribute("font-weight", "700");
+      text.setAttribute("fill", "#d11"); // red like the image
+      text.setAttribute("text-anchor", "middle");
+
+      text.textContent = `t=${currentTime}`;
+      t += 1;
+
+      this.#svg.appendChild(text);
+    } else {
+      const toX = childX;
+      const toY = y + 5;
 
       const path = make("path");
       const d = `M ${fromX} ${fromY} L ${toX} ${toY}`;
@@ -435,8 +419,68 @@ export default class TraversalTreeViewerManager {
       const text = make("text");
       const midX = (fromX + toX) / 2;
       const midY = (fromY + toY) / 2;
+
       text.setAttribute("x", String(midX));
       text.setAttribute("y", String(midY - 10));
+      text.setAttribute("font-size", "12");
+      text.setAttribute("font-weight", "700");
+      text.setAttribute("fill", "#d11"); // red like the image
+      text.setAttribute("text-anchor", "middle");
+
+      text.textContent = `t=${currentTime}`;
+      t += 1;
+      this.#svg.appendChild(text);
+    }
+  }
+
+  #renderSplit(node, children, x, y, currentTime) {
+    const make = (tag) => document.createElementNS(SVG_NS, tag);
+    const sToString = (S) => `S([${(S ?? []).join(",")}])`;
+
+    const drawNode = (n, nx, ny) => {
+      const g = make("g");
+      g.setAttribute("transform", `translate(${nx},${ny})`);
+      const title = make("text");
+      title.setAttribute("font-size", "14");
+      title.setAttribute("font-weight", "600");
+      title.setAttribute("fill", "currentColor");
+      title.textContent = n.v;
+      g.appendChild(title);
+      const sub = make("text");
+      sub.setAttribute("y", "18");
+      sub.setAttribute("font-size", "12");
+      sub.setAttribute("opacity", "0.85");
+      sub.setAttribute("fill", "currentColor");
+      sub.textContent = sToString(n.S);
+      g.appendChild(sub);
+      this.#svg.appendChild(g);
+      return g.getBBox();
+    };
+
+    const totalHeight = (children.length - 1) * Y_GAP;
+    const centeredY = y + totalHeight / 2;
+    const parentBBox = drawNode(node, x, centeredY);
+
+    const fromX = x + parentBBox.width + BOX_PAD_X;
+    const fromY = centeredY + parentBBox.height / 2;
+
+    // Draw fan-out lines only — no child nodes drawn here
+    let childY = y;
+    for (const child of children) {
+      // Estimate toY based on childY — child node drawn later
+      const toX = x + X_GAP;
+      const toY = childY + 10; // approximate midpoint of text height
+
+      const path = make("path");
+      path.setAttribute("d", `M ${fromX} ${fromY} L ${toX} ${toY}`);
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke-width", "2.2");
+      this.#svg.appendChild(path);
+
+      const text = make("text");
+      text.setAttribute("x", String((fromX + toX) / 2));
+      text.setAttribute("y", String((fromY + toY) / 2 - 10));
       text.setAttribute("font-size", "12");
       text.setAttribute("font-weight", "700");
       text.setAttribute("fill", "#d11");
@@ -449,5 +493,82 @@ export default class TraversalTreeViewerManager {
     }
   }
 
-  #renderANDJoin(node, children) {}
+  #renderANDJoin(child, grandchild, x, y, targetY) {
+    console.log(
+      "renderANDJoin - child:",
+      child.v,
+      "x:",
+      x,
+      "y:",
+      y,
+      "targetY:",
+      targetY,
+    );
+
+    const make = (tag) => document.createElementNS(SVG_NS, tag);
+    const sToString = (S) => `S([${(S ?? []).join(",")}])`;
+
+    // Draw the intermediate node (e.g. x2 or x3) at this branch's y
+    const g = make("g");
+    g.setAttribute("transform", `translate(${x + 5},${y + 10})`);
+
+    const title = make("text");
+    title.setAttribute("font-size", "14");
+    title.setAttribute("font-weight", "600");
+    title.setAttribute("fill", "currentColor");
+    title.textContent = `(${child.v})`;
+    g.appendChild(title);
+
+    this.#svg.appendChild(g);
+    const bbox = g.getBBox();
+
+    const fromX = x + bbox.width + BOX_PAD_X;
+    const fromY = y + bbox.height / 2;
+    const toX = x + X_GAP;
+    const toY = targetY + 10; // same approximate midpoint as drawNodeOnly
+
+    const path = make("path");
+    path.setAttribute("d", `M ${fromX} ${fromY} L ${toX} ${toY}`);
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke-width", "2.2");
+    this.#svg.appendChild(path);
+
+    // Time label
+    const text = make("text");
+    text.setAttribute("x", String((fromX + toX) / 2));
+    text.setAttribute("y", String(Math.min(fromY, toY) + 20));
+    text.setAttribute("font-size", "12");
+    text.setAttribute("font-weight", "700");
+    text.setAttribute("fill", "#d11");
+    text.setAttribute("text-anchor", "middle");
+    text.textContent = `t=${grandchild.time}`;
+    this.#svg.appendChild(text);
+  }
+
+  #drawNodeOnly(node, x, y) {
+    const make = (tag) => document.createElementNS(SVG_NS, tag);
+    const sToString = (S) => `S([${(S ?? []).join(",")}])`;
+
+    const g = make("g");
+    g.setAttribute("transform", `translate(${x},${y})`);
+
+    const title = make("text");
+    title.setAttribute("font-size", "14");
+    title.setAttribute("font-weight", "600");
+    title.setAttribute("fill", "currentColor");
+    title.textContent = node.v;
+    g.appendChild(title);
+
+    const sub = make("text");
+    sub.setAttribute("y", "18");
+    sub.setAttribute("font-size", "12");
+    sub.setAttribute("opacity", "0.85");
+    sub.setAttribute("fill", "currentColor");
+    sub.textContent = sToString(node.S);
+    g.appendChild(sub);
+
+    this.#svg.appendChild(g);
+    return g.getBBox();
+  }
 }
