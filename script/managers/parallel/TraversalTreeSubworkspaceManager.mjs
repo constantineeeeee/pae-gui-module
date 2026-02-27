@@ -9,6 +9,7 @@ const X_GAP = 320;
 const Y_GAP = 150;
 const BOX_PAD_X = 10;
 const BOX_PAD_Y = 8;
+var t = 1;
 
 export default class TraversalTreeViewerManager {
   context;
@@ -18,6 +19,7 @@ export default class TraversalTreeViewerManager {
   #subworkspace;
   #svg;
   #root;
+  #drawnNodes = new Set();
 
   constructor(context, visualModelSnapshot) {
     this.context = context;
@@ -47,7 +49,6 @@ export default class TraversalTreeViewerManager {
         this.context.managers.workspace.gotoMainModel();
       });
 
-    // Add this new listener for the export action
     root
       .querySelector('[data-tt-action="exportTT"]')
       ?.addEventListener("click", () => this.#exportImage());
@@ -108,6 +109,7 @@ export default class TraversalTreeViewerManager {
     const res = this.context.managers.traversalTree.run(snapshot);
 
     // this.#clearSVG();
+    console.log("Traversal Tree Result:", res);
 
     if (!res || res === 0) {
       this.#drawMessage("No traversal tree generated.");
@@ -129,8 +131,22 @@ export default class TraversalTreeViewerManager {
   }
 
   #renderTree(res) {
+    this.#drawnNodes = new Set();
     const make = (tag) => document.createElementNS(SVG_NS, tag);
-    const sToString = (S) => `S([${(S ?? []).join(",")}])`;
+
+    const n = res.allNodes[0];
+    console.log("node id:", n.id);
+    console.log("node v:", n.v);
+    console.log("node S:", n.S);
+    console.log("node time:", n.time);
+    console.log(
+      "children ids:",
+      (n.children ?? []).map((c) => c.id),
+    );
+    console.log(
+      "parent ids:",
+      (n.parents ?? []).map((p) => p.id),
+    );
 
     // ---- defs: arrowhead marker ----
     const defs = make("defs");
@@ -151,187 +167,92 @@ export default class TraversalTreeViewerManager {
     defs.appendChild(marker);
     this.#svg.appendChild(defs);
 
-    // ---------- 1. Build Spanning Tree ----------
-    const childrenOf = new Map();
-    res.allNodes.forEach((n) => childrenOf.set(n.id, []));
-
-    const sortedNodes = [...res.allNodes].sort((a, b) => b.time - a.time);
-
-    const parentOf = new Map();
-    for (const n of sortedNodes) {
-      for (const c of n.children ?? []) {
-        if (!parentOf.has(c.id)) {
-          parentOf.set(c.id, n.id);
-          childrenOf.get(n.id).push(c);
-        }
-      }
-    }
-
-    // ---------- 2. Compute Subtree Widths ----------
-    const leafCount = new Map();
-    function calcLeaves(node) {
-      const children = childrenOf.get(node.id);
-      if (children.length === 0) {
-        leafCount.set(node.id, 1);
-        return 1;
-      }
-      let sum = 0;
-      for (const c of children) sum += calcLeaves(c);
-      leafCount.set(node.id, sum);
-      return sum;
-    }
-
-    const roots = res.allNodes.filter(
+    const firstNode = res.allNodes.find(
       (n) => !n.parents || n.parents.length === 0,
     );
-    roots.forEach((r) => calcLeaves(r));
-
-    // ---------- 3. Assign Grid Positions ----------
-    const layoutPos = new Map();
-
-    function assignPos(node, yStart) {
-      const x = LEFT_PAD + node.time * X_GAP;
-      const myLeaves = leafCount.get(node.id);
-      const myHeight = myLeaves * Y_GAP;
-      const y = yStart + myHeight / 2 - Y_GAP / 2;
-
-      layoutPos.set(node.id, { x, y });
-
-      let currY = yStart;
-      for (const c of childrenOf.get(node.id)) {
-        assignPos(c, currY);
-        currY += leafCount.get(c.id) * Y_GAP;
-      }
+    if (firstNode) {
+      this.#renderDispatch(firstNode, res.joinTypes, LEFT_PAD, TOP_PAD);
     }
 
-    let currentRootY = TOP_PAD;
-    for (const r of roots) {
-      assignPos(r, currentRootY);
-      currentRootY += leafCount.get(r.id) * Y_GAP;
-    }
+    // Resize SVG to fit content
+    const bbox = this.#svg.getBBox();
+    const padding = 100;
 
-    // ---------- 4. SVG Layers ----------
-    const edgeGroup = make("g");
-    const syncGroup = make("g");
-    const nodeGroup = make("g");
-    this.#svg.appendChild(edgeGroup);
-    this.#svg.appendChild(syncGroup);
-    this.#svg.appendChild(nodeGroup);
-
-    // ---------- 5. SVG Drawing Helpers ----------
-    const drawBezierEdge = (x1, y1, x2, y2, timeLabel, opacity = "0.9") => {
-      const path = make("path");
-      const midX = (x1 + x2) / 2;
-
-      // smoother than your original: pull curves outward
-      const c1x = x1 + (midX - x1) * 0.8;
-      const c2x = x2 - (x2 - midX) * 0.8;
-
-      const d = `M ${x1} ${y1} C ${c1x} ${y1}, ${c2x} ${y2}, ${x2} ${y2}`;
-
-      path.setAttribute("d", d);
-      path.setAttribute("stroke", "currentColor");
-      path.setAttribute("fill", "none");
-      path.setAttribute("stroke-width", "2.2");
-      path.setAttribute("opacity", opacity);
-      path.setAttribute("marker-end", "url(#tt-arrow)");
-
-      edgeGroup.appendChild(path);
-
-      if (timeLabel !== undefined) {
-        const text = make("text");
-        const midY = (y1 + y2) / 2;
-
-        text.setAttribute("x", String(midX));
-        text.setAttribute("y", String(midY - 10));
-        text.setAttribute("font-size", "12");
-        text.setAttribute("font-weight", "700");
-        text.setAttribute("fill", "#d11"); // red like the image
-        text.setAttribute("text-anchor", "middle");
-
-        text.textContent = `t=${timeLabel}`;
-        edgeGroup.appendChild(text);
-      }
-    };
-
-    const drawTextNode = (x, y, v, S) => {
-      const g = make("g");
-      g.setAttribute("transform", `translate(${x},${y})`);
-
-      const title = make("text");
-      title.setAttribute("font-size", "14");
-      title.setAttribute("font-weight", "600");
-      title.setAttribute("fill", "currentColor");
-      title.textContent = v;
-      g.appendChild(title);
-
-      const sub = make("text");
-      sub.setAttribute("y", "18");
-      sub.setAttribute("font-size", "12");
-      sub.setAttribute("opacity", "0.85");
-      sub.setAttribute("fill", "currentColor");
-      sub.textContent = sToString(S);
-      g.appendChild(sub);
-
-      nodeGroup.appendChild(g);
-      const bb = g.getBBox();
-      return {
-        w: bb.width,
-        h: bb.height,
-        xIn: x, // left edge of group anchor
-        xOut: x + bb.width, // right edge
-        yMid: y + bb.height / 2,
-      };
-    };
-
-    // ---------- 6. Render Nodes & Capture Bounds ----------
-    const finalPos = new Map();
-
-    for (const n of res.allNodes) {
-      const { x, y } = layoutPos.get(n.id);
-      const dims = drawTextNode(x, y, n.v, n.S);
-      finalPos.set(n.id, { id: n.id, v: n.v, x, y, ...dims });
-    }
-    // ---------- 7. Render Edges (Visually Converging Joins) ----------
-    for (const n of res.allNodes) {
-      const to = finalPos.get(n.id);
-      if (!to) continue;
-
-      for (const p of n.parents ?? []) {
-        const from = finalPos.get(p.id);
-        if (!from) continue;
-
-        // We REMOVED the crossParents check here!
-        // Now, every parent branch will draw a beautiful Bezier curve
-        // that converges directly into this single merged node.
-        drawBezierEdge(from.xOut, from.yMid, to.xIn, to.yMid, n.time);
-      }
-    }
-
-    // ---------- 9. Dynamically Resize SVG ----------
-    let maxX = 0;
-    let maxY = 0;
-
-    for (const bounds of finalPos.values()) {
-      const rightEdge = bounds.xOut + 150;
-      const bottomEdge = bounds.yMid + 150;
-
-      if (rightEdge > maxX) maxX = rightEdge;
-      if (bottomEdge > maxY) maxY = bottomEdge;
-    }
+    const contentWidth = bbox.x + bbox.width + padding;
+    const contentHeight = bbox.y + bbox.height + padding;
 
     const clientWidth = this.#root.clientWidth || 800;
     const clientHeight = this.#root.clientHeight || 600;
 
-    this.#svg.style.width = `${Math.max(maxX, clientWidth)}px`;
-    this.#svg.style.height = `${Math.max(maxY, clientHeight)}px`;
+    this.#svg.style.width = `${Math.max(contentWidth, clientWidth)}px`;
+    this.#svg.style.height = `${Math.max(contentHeight, clientHeight)}px`;
+  }
+
+  #renderDispatch(node, joinTypes, x, y) {
+    const children = node.children ?? [];
+
+    if (children.length === 0) return;
+
+    if (children.length === 1) {
+      const child = children[0];
+      const isJoin = (child.parents ?? []).length > 1;
+
+      if (isJoin) {
+        const joinType = joinTypes.get(child.v) ?? "OR";
+
+        if (joinType === "AND") {
+          this.#renderNormalTraverse(node, [child], x, y, child.time);
+          if (!this.#drawnNodes.has(child.id)) {
+            this.#drawnNodes.add(child.id);
+            this.#renderDispatch(child, joinTypes, x + X_GAP, y);
+          }
+        }
+      } else {
+        this.#renderNormalTraverse(node, [child], x, y, child.time);
+        this.#renderDispatch(child, joinTypes, x + X_GAP, y);
+      }
+    } else {
+      const topY = y;
+      const bottomY = y + (children.length - 1) * Y_GAP;
+      const midY = (topY + bottomY) / 2;
+
+      this.#renderSplit(node, children, x, y, t);
+
+      let childY = y;
+      for (const child of children) {
+        const grandchild = (child.children ?? [])[0];
+        const isANDJoin =
+          grandchild &&
+          (grandchild.parents ?? []).length > 1 &&
+          joinTypes.get(grandchild.v) === "AND";
+
+        if (isANDJoin) {
+          this.#renderANDJoin(child, grandchild, x + X_GAP, childY, midY);
+        } else {
+          this.#renderDispatch(child, joinTypes, x + X_GAP, childY);
+        }
+
+        childY += Y_GAP;
+      }
+
+      const joinNode = children
+        .flatMap((c) => c.children ?? [])
+        .find((c) => (c.parents ?? []).length > 1);
+
+      if (joinNode && joinTypes.get(joinNode.v) === "AND") {
+        if (!this.#drawnNodes.has(joinNode.id)) {
+          this.#drawnNodes.add(joinNode.id);
+          this.#drawNodeOnly(joinNode, x + X_GAP * 2, midY);
+          this.#renderDispatch(joinNode, joinTypes, x + X_GAP * 2, midY);
+        }
+      }
+    }
   }
 
   #renderResults(res) {
     const parallelHost = this.#root.querySelector("[data-tt-parallel]");
     if (!parallelHost) return;
 
-    // Clear previous results
     parallelHost.innerHTML = "";
 
     const fmtS = (S) => `S([${(S ?? []).join(",")}])`;
@@ -356,14 +277,12 @@ export default class TraversalTreeViewerManager {
       host.appendChild(list);
     };
 
-    // 1. Render the strings into the UI panel
     if (res.maximalPaths && res.maximalPaths.length > 0) {
       renderGroup(parallelHost, res.maximalPaths);
     } else {
       parallelHost.textContent = "No parallel branches calculated.";
     }
 
-    // 2. Populate Sidebar Details (Nodes, Times, Source, Sink)
     const sourceMeta = this.#root.querySelector('[data-tt-meta="source"]');
     const sinkMeta = this.#root.querySelector('[data-tt-meta="sink"]');
     const nodesMeta = this.#root.querySelector('[data-tt-meta="nodes"]');
@@ -391,4 +310,144 @@ export default class TraversalTreeViewerManager {
       timesMeta.textContent = `0 to ${maxTime}`;
     }
   }
+
+  // STRUCTURE TEMPLATES
+
+  #renderNormalTraverse(node, children, x, y, currentTime) {
+    const make = (tag) => document.createElementNS(SVG_NS, tag);
+    const sToString = (S) => `S([${(S ?? []).join(",")}])`;
+
+    // DRAW NODE
+    const drawNode = (n, x, y, hideS = false) => {
+      const g = make("g");
+      g.setAttribute("transform", `translate(${x},${y})`);
+
+      const title = make("text");
+      title.setAttribute("font-size", "14");
+      title.setAttribute("font-weight", "600");
+      title.setAttribute("fill", "currentColor");
+      title.textContent = n.v;
+      g.appendChild(title);
+
+      if (!hideS) {
+        const sub = make("text");
+        sub.setAttribute("y", "18");
+        sub.setAttribute("font-size", "12");
+        sub.setAttribute("opacity", "0.85");
+        sub.setAttribute("fill", "currentColor");
+        sub.textContent = sToString(n.S);
+        g.appendChild(sub);
+      }
+
+      this.#svg.appendChild(g);
+      return g.getBBox();
+    };
+
+    const parentBBox = drawNode(node, x, y);
+    const child = children[0];
+
+    const fromX = x + parentBBox.width + BOX_PAD_X;
+    const fromY = y + parentBBox.height / 2;
+
+    x += X_GAP;
+
+    const childBBox = drawNode(child, x, y);
+
+    const toX = x;
+    const toY = y + childBBox.height / 2;
+
+    // Draw edge (straight line for now)
+    const path = make("path");
+    const d = `M ${fromX} ${fromY} L ${toX} ${toY}`;
+    path.setAttribute("d", d);
+    path.setAttribute("stroke", "currentColor");
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke-width", "2.2");
+    this.#svg.appendChild(path);
+
+    const text = make("text");
+    const midX = (fromX + toX) / 2;
+    const midY = (fromY + toY) / 2;
+
+    text.setAttribute("x", String(midX));
+    text.setAttribute("y", String(midY - 10));
+    text.setAttribute("font-size", "12");
+    text.setAttribute("font-weight", "700");
+    text.setAttribute("fill", "#d11"); // red like the image
+    text.setAttribute("text-anchor", "middle");
+
+    text.textContent = `t=${currentTime}`;
+    t += 1;
+    this.#svg.appendChild(text);
+  }
+  #renderSplit(node, children, x, y, currentTime) {
+    const make = (tag) => document.createElementNS(SVG_NS, tag);
+    const sToString = (S) => `S([${(S ?? []).join(",")}])`;
+
+    const drawNode = (n, nx, ny) => {
+      const g = make("g");
+      g.setAttribute("transform", `translate(${nx},${ny})`);
+
+      const title = make("text");
+      title.setAttribute("font-size", "14");
+      title.setAttribute("font-weight", "600");
+      title.setAttribute("fill", "currentColor");
+      title.textContent = n.v;
+      g.appendChild(title);
+
+      const sub = make("text");
+      sub.setAttribute("y", "18");
+      sub.setAttribute("font-size", "12");
+      sub.setAttribute("opacity", "0.85");
+      sub.setAttribute("fill", "currentColor");
+      sub.textContent = sToString(n.S);
+      g.appendChild(sub);
+
+      this.#svg.appendChild(g);
+      return g.getBBox();
+    };
+
+    const totalHeight = (children.length - 1) * Y_GAP;
+
+    const centeredY = y + totalHeight / 2;
+    const parentBBox = drawNode(node, x, centeredY);
+
+    const fromX = x + parentBBox.width + BOX_PAD_X;
+    const fromY = centeredY + parentBBox.height / 2;
+
+    const childX = x + X_GAP;
+    let childY = y;
+
+    for (const child of children) {
+      const childBBox = drawNode(child, childX, childY);
+
+      const toX = childX;
+      const toY = childY + childBBox.height / 2;
+
+      const path = make("path");
+      const d = `M ${fromX} ${fromY} L ${toX} ${toY}`;
+      path.setAttribute("d", d);
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke-width", "2.2");
+      this.#svg.appendChild(path);
+
+      const text = make("text");
+      const midX = (fromX + toX) / 2;
+      const midY = (fromY + toY) / 2;
+      text.setAttribute("x", String(midX));
+      text.setAttribute("y", String(midY - 10));
+      text.setAttribute("font-size", "12");
+      text.setAttribute("font-weight", "700");
+      text.setAttribute("fill", "#d11");
+      text.setAttribute("text-anchor", "middle");
+      text.textContent = `t=${currentTime}`;
+      this.#svg.appendChild(text);
+
+      t += 1;
+      childY += Y_GAP;
+    }
+  }
+
+  #renderANDJoin(node, children) {}
 }

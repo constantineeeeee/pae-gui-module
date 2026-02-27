@@ -472,5 +472,6 @@ export function generateTraversalTreeFromJSON(
   return {
     allNodes: allNodes,
     maximalPaths: Array.from(uniqueMaximalPaths.values()),
+    joinTypes: joinTypes,
   };
 }
