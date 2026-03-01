@@ -322,6 +322,90 @@ export class CASExtractor {
             }
         }
 
+        // -----------------------------------------------------------------
+        // Pre-compute eRU per RBS using Definition 7 from Malinao 2024.
+        //
+        // Algorithm 5, Line 2: uMAS2 L-values are based on eRU.
+        //
+        // Definition 7 (Expanded Reusability in RDLTs with Resets):
+        //   For (x,y) ∈ E' (inside RBS B with center v, in-bridges IBr):
+        //
+        //     eRU(x,y) = Σ_{(u,v) ∈ IBr} l(u,v) × (RU'(x,y) + 1)
+        //
+        //   where:
+        //     l(u,v) = min{L(u,v), Σ PCAs outside c} if a partial cycle c
+        //              exists containing both (u,v) and (x,y),
+        //              or 1 if no such partial cycle c exists.
+        //
+        //     RU'(x,y) = RU(x,y) computed solely within B's edges E',
+        //                where (x,y) is not a CA in B;
+        //                otherwise RU'(x,y) = L(x,y).
+        //
+        // We build a map: identifier → { rbs, rbsInfo } so that
+        // we can quickly look up the RBS for any CAS vertex.
+        // -----------------------------------------------------------------
+        const identifierToRBS = new Map();
+        if (originalRDLT && originalRDLT.resetBoundSubsystems) {
+            for (const rbs of originalRDLT.resetBoundSubsystems) {
+                // Collect all identifiers (names) that belong to this RBS:
+                // the center vertex + all member vertices.
+                const rbsIdentifiers = new Set();
+                if (rbs.center && rbs.center.name) {
+                    rbsIdentifiers.add(rbs.center.name);
+                }
+                if (rbs.members) {
+                    for (const m of rbs.members) {
+                        if (m.name) rbsIdentifiers.add(m.name);
+                    }
+                }
+
+                // ── Compute RU'(x,y) for internal arcs ──────────────────
+                // Find cycles entirely within the RBS (using R2 edges).
+                // RU'(x,y) = RU(x,y) computed solely within B's edges.
+                // For an arc not involved in any internal cycle: RU' = 0.
+                const internalEdges = R2 ? R2.edges.filter(
+                    e => rbsIdentifiers.has(e.from.id) && rbsIdentifiers.has(e.to.id)
+                ) : [];
+                const internalCycles = this._findInternalCycles(internalEdges, rbsIdentifiers);
+                const ruPrimeMap = this._computeRUPrime(internalEdges, internalCycles);
+
+                // ── Compute l(u,v) for each in-bridge ───────────────────
+                // Check for partial cycles: cycles in R that cross the RBS
+                // boundary (have arcs both inside and outside B).
+                // A partial cycle exists if there is a path in R from any
+                // out-bridge destination back to any in-bridge source.
+                const outBridgeDests = new Set(
+                    (rbs.outBridges || []).map(b => b.to?.name).filter(Boolean)
+                );
+                const inBridgeSources = new Set(
+                    (rbs.inBridges || []).map(b => b.from?.name).filter(Boolean)
+                );
+                const hasPartialCycle = this._hasPathBetweenSets(
+                    originalRDLT, outBridgeDests, inBridgeSources, rbsIdentifiers
+                );
+
+                // For each in-bridge, compute l(u,v):
+                //   - If no partial cycle: l(u,v) = 1
+                //   - If partial cycle exists: l(u,v) = L(u,v)
+                //     (simplified; full formula uses min with PCA sums)
+                const inBridgeEntries = (rbs.inBridges || []).map(bridge => {
+                    if (hasPartialCycle) {
+                        return bridge.maxTraversals || 1;
+                    }
+                    return 1;
+                });
+
+                const numInBridges = inBridgeEntries.length;
+                const sumLuv = inBridgeEntries.reduce((a, b) => a + b, 0);
+
+                console.log(`  RBS center=${rbs.center?.name}, members=[${[...rbsIdentifiers].join(',')}], inBridges=${(rbs.inBridges || []).map(b => `${b.from?.name}→${b.to?.name} L=${b.maxTraversals}`).join(', ')}, numInBridges=${numInBridges}, sumL(u,v)=${sumLuv}, hasPartialCycle=${hasPartialCycle}, internalCycles=${internalCycles.length}`);
+
+                for (const id of rbsIdentifiers) {
+                    identifierToRBS.set(id, { rbs, sumLuv, ruPrimeMap, hasPartialCycle });
+                }
+            }
+        }
+
         const restored = new Graph();
         restored.vertices = [...cas.vertices];
 
@@ -335,8 +419,26 @@ export class CASExtractor {
             const isInsideRBS = r2VertexIds.has(fromId) && r2VertexIds.has(toId);
 
             if (isInsideRBS) {
-                // Inside RBS → keep eRU value (already correct from R2 MAS)
-                console.log(`  CAS L-value: ${fromId}→${toId} INSIDE RBS, keeping L=${edgeCopy.maxTraversals} (eRU)`);
+                // Inside RBS → compute eRU per Definition 7
+                const rbsInfo = identifierToRBS.get(fromId) || identifierToRBS.get(toId);
+
+                if (rbsInfo) {
+                    const arcKey = `${fromId}->${toId}`;
+                    const ruPrime = rbsInfo.ruPrimeMap.get(arcKey) || 0;
+                    const eRU = rbsInfo.sumLuv * (ruPrime + 1);
+                    console.log(`  CAS L-value: ${fromId}→${toId} INSIDE RBS, eRU = Σl(u,v)[${rbsInfo.sumLuv}] × (RU'[${ruPrime}] + 1) = ${eRU}`);
+                    edgeCopy.maxTraversals = eRU;
+                } else {
+                    // Fallback: no RBS info found – look up original L
+                    const nameKey = `${edge.from.name || fromId}->${edge.to.name || toId}`;
+                    const idKey = `${fromId}->${toId}`;
+                    const originalEdge = originalEdgeMap.get(nameKey)
+                                      || originalEdgeMap.get(idKey);
+                    edgeCopy.maxTraversals = originalEdge
+                        ? originalEdge.maxTraversals
+                        : edgeCopy.maxTraversals;
+                    console.warn(`  CAS L-value: ${fromId}→${toId} INSIDE RBS, no RBS info – using L=${edgeCopy.maxTraversals}`);
+                }
             } else {
                 // Outside RBS → restore from original RDLT
                 // Try matching by name first (handles UID vs identifier mismatch),
@@ -361,6 +463,174 @@ export class CASExtractor {
         });
 
         return restored;
+    }
+
+    // -----------------------------------------------------------------
+    // eRU Helper Methods (Definition 7, Malinao 2024)
+    // -----------------------------------------------------------------
+
+    /**
+     * Finds all simple cycles within the RBS using edges whose both
+     * endpoints are in rbsIdentifiers. Uses Johnson's algorithm concept
+     * simplified for small subgraphs.
+     *
+     * @param {Array<Edge>} internalEdges - Edges entirely within the RBS.
+     * @param {Set<string>} rbsIdentifiers - Vertex identifiers in the RBS.
+     * @returns {Array<Array<string>>} Array of cycles, each a list of vertex ids.
+     */
+    static _findInternalCycles(internalEdges, rbsIdentifiers) {
+        // Build adjacency list from internal edges
+        const adj = new Map();
+        for (const id of rbsIdentifiers) {
+            adj.set(id, []);
+        }
+        for (const e of internalEdges) {
+            if (adj.has(e.from.id)) {
+                adj.get(e.from.id).push(e.to.id);
+            }
+        }
+
+        const cycles = [];
+        const visited = new Set();
+
+        // Simple DFS-based cycle detection
+        for (const startId of rbsIdentifiers) {
+            const stack = [[startId, [startId], new Set([startId])]];
+            while (stack.length > 0) {
+                const [current, path, pathSet] = stack.pop();
+                const neighbors = adj.get(current) || [];
+                for (const next of neighbors) {
+                    if (next === startId && path.length > 1) {
+                        cycles.push([...path]);
+                    } else if (!pathSet.has(next) && !visited.has(next)) {
+                        const newPathSet = new Set(pathSet);
+                        newPathSet.add(next);
+                        stack.push([next, [...path, next], newPathSet]);
+                    }
+                }
+            }
+            visited.add(startId);
+        }
+
+        return cycles;
+    }
+
+    /**
+     * Computes RU'(x,y) for each internal arc based on internal cycles.
+     * RU'(x,y) = RU(x,y) computed solely within B's edges.
+     * RU(x,y) = Σ_{cycles containing (x,y)} (I × L(u,v)) for some
+     *           (u,v) ∈ minLCA(c).
+     * For arcs not in any cycle: RU' = 0.
+     *
+     * Simplified: For each internal cycle c containing (x,y),
+     * add minL(c) (the minimum L-value among arcs in c).
+     *
+     * @param {Array<Edge>} internalEdges - Edges entirely within the RBS.
+     * @param {Array<Array<string>>} cycles - Internal cycles found.
+     * @returns {Map<string, number>} Map from "fromId->toId" to RU' value.
+     */
+    static _computeRUPrime(internalEdges, cycles) {
+        const ruPrime = new Map();
+
+        if (cycles.length === 0) {
+            // No internal cycles → RU' = 0 for all arcs
+            return ruPrime;
+        }
+
+        // Build edge L-value lookup
+        const edgeLMap = new Map();
+        for (const e of internalEdges) {
+            edgeLMap.set(`${e.from.id}->${e.to.id}`, e.maxTraversals || 1);
+        }
+
+        // For each cycle, find the minimum L-value (critical arc L-value)
+        for (const cycle of cycles) {
+            // Get arcs of this cycle
+            const cycleArcs = [];
+            for (let i = 0; i < cycle.length; i++) {
+                const from = cycle[i];
+                const to = cycle[(i + 1) % cycle.length];
+                cycleArcs.push(`${from}->${to}`);
+            }
+
+            // Find min L-value in cycle (the controlling L-value)
+            let minL = Infinity;
+            for (const arcKey of cycleArcs) {
+                const l = edgeLMap.get(arcKey);
+                if (l !== undefined && l < minL) {
+                    minL = l;
+                }
+            }
+            if (minL === Infinity) minL = 1;
+
+            // Add minL contribution to RU' for each arc in cycle
+            for (const arcKey of cycleArcs) {
+                const current = ruPrime.get(arcKey) || 0;
+                ruPrime.set(arcKey, current + minL);
+            }
+        }
+
+        // Cap RU'(x,y) at L(x,y) for each arc
+        for (const [arcKey, ru] of ruPrime) {
+            const l = edgeLMap.get(arcKey);
+            if (l !== undefined && ru > l) {
+                ruPrime.set(arcKey, l);
+            }
+        }
+
+        return ruPrime;
+    }
+
+    /**
+     * Checks if there exists a path in the original RDLT from any vertex
+     * in sourcesSet to any vertex in targetsSet, without passing through
+     * RBS-internal vertices (to detect partial cycles that cross the RBS
+     * boundary).
+     *
+     * @param {Graph} originalRDLT - The original RDLT graph.
+     * @param {Set<string>} sourcesSet - Set of vertex names to start from
+     *                                   (out-bridge destinations).
+     * @param {Set<string>} targetsSet - Set of vertex names to reach
+     *                                   (in-bridge sources).
+     * @param {Set<string>} rbsIdentifiers - Vertex names inside the RBS
+     *                                       (to exclude from path search).
+     * @returns {boolean} True if a partial cycle path exists.
+     */
+    static _hasPathBetweenSets(originalRDLT, sourcesSet, targetsSet, rbsIdentifiers) {
+        if (!originalRDLT || !originalRDLT.edges || sourcesSet.size === 0 || targetsSet.size === 0) {
+            return false;
+        }
+
+        // Build adjacency list using vertex names (identifiers)
+        const adj = new Map();
+        for (const e of originalRDLT.edges) {
+            const fromName = e.from.name || e.from.id;
+            const toName = e.to.name || e.to.id;
+            if (!adj.has(fromName)) adj.set(fromName, []);
+            adj.get(fromName).push(toName);
+        }
+
+        // BFS from each source, avoiding RBS-internal vertices
+        for (const start of sourcesSet) {
+            const visited = new Set([start]);
+            const queue = [start];
+            while (queue.length > 0) {
+                const current = queue.shift();
+                if (targetsSet.has(current)) {
+                    return true; // Found a path → partial cycle exists
+                }
+                for (const next of (adj.get(current) || [])) {
+                    // Skip RBS-internal vertices (the external path must
+                    // go around the RBS, not through it)
+                    if (!visited.has(next) && !rbsIdentifiers.has(next)) {
+                        visited.add(next);
+                        queue.push(next);
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

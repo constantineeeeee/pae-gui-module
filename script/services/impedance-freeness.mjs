@@ -22,7 +22,7 @@ import { processR2 } from "./soundness/utils/create_r2.mjs";
 import { CASExtractor } from "./soundness/utils/cas-extractor.js";
 
 export function verifyImpedanceFreeness(simpleModel, source, sink) {
-    console.log(source, sink);
+  console.log(source, sink);
   const arcMap = buildArcMap(simpleModel.arcs);
   const vertexMap = buildVertexMap(simpleModel.components);
 
@@ -57,7 +57,7 @@ export function verifyImpedanceFreeness(simpleModel, source, sink) {
   // console.log("R2:", R2);
   // console.log("EVSA:", evsa);
 
-  const { rdltGraph, r2Graphs, r1Graph } = mapToGraphs(inputRDLT, R1, R2);
+  const { rdltGraph, r2Graphs, r1Graph } = mapToGraphs(inputRDLT, R2, R1);
   const sourceVertex = rdltGraph.vertices.find(
     (v) => v.id === source || v.id === String(source),
   );
@@ -87,26 +87,149 @@ export function verifyImpedanceFreeness(simpleModel, source, sink) {
   //   console.log("r2Graphs:", r2Graphs);
   //   console.log("r1Graph:", r1Graph);
 
-  let combinedEvsa;
-  if (r2Graphs.length > 0) {
-    combinedEvsa = [r1Graph, ...r2Graphs.map((item) => item.graph)];
-  } else {
-    combinedEvsa = [r1Graph];
-  }
+  //   let combinedEvsa;
+  //   if (r2Graphs.length > 0) {
+  //     combinedEvsa = [r1Graph, ...r2Graphs.map((item) => item.graph)];
+  //   } else {
+  //     combinedEvsa = [r1Graph];
+  //   }
 
   //   console.log("Combined EVSA Graphs:", combinedEvsa);
 
-  const casSet = CASExtractor.extractAllCASWithDetails(
+  const { casSet } = CASExtractor.extractAllCASWithDetails(
     rdltGraph,
-    R2Graph,
     r1Graph,
+    R2Graph,
     source,
     sink,
   );
   console.log("Extracted CAS:", casSet);
 
-  let pass = true;
+  const normalizedMAS = normalizeCASLValues(casSet, rdltGraph, R2Graph);
 
+  if (normalizedMAS.length === 0) {
+    return unreachableResult();
+  }
+
+  if (normalizedMAS.length === 1) {
+    return singleCASResult();
+  }
+
+  const { pass, violatingArcKeys, criteria } =
+    checkImpedanceFreeness(normalizedMAS);
+
+  const generatedActivities = summarizeActivities(normalizedMAS);
+  const sharedArcs = computeSharedArcs(normalizedMAS);
+
+  // Convert shared arcs to highlightable arc UIDs too (optional)
+  const sharedArcUIDs = sharedArcs
+    .map((a) => {
+      const arc = simpleModel.arcs.find((raw) => {
+        const from = vertexMap[raw.fromVertexUID];
+        const to = vertexMap[raw.toVertexUID];
+        return from?.identifier === a.from && to?.identifier === a.to;
+      });
+      return arc ? arc.uid : null;
+    })
+    .filter(Boolean);
+
+  const violatingArcUIDs = violatingArcKeys
+    .map((key) => {
+      const [fromId, toId] = key.split("->");
+      const arc = simpleModel.arcs.find((a) => {
+        const from = vertexMap[a.fromVertexUID];
+        const to = vertexMap[a.toVertexUID];
+        return (
+          from && to && from.identifier === fromId && to.identifier === toId
+        );
+      });
+      return arc ? arc.uid : null;
+    })
+    .filter(Boolean);
+
+  // Build transformedArcMap once
+  const transformedArcMap = transformArcMapLocal(arcMap);
+
+  // --- Existing "Main Model" instance stays ---
+  const mainInstance = {
+    name: "Main Model",
+    evaluation: {
+      conclusion: {
+        pass,
+        title: pass ? "Impedance-Free" : "Not Impedance-Free",
+        description: ``,
+      },
+      criteria,
+      violating: { arcs: violatingArcUIDs, vertices: [] },
+      // (optional) you can keep your details block, but the default UI panels won't render it
+    },
+  };
+
+  const sharedArcInstance = buildSharedArcInstance(sharedArcs, sharedArcUIDs);
+  const casInstances = buildCASInstances(normalizedMAS, {
+    vertexMap,
+    arcMap,
+    transformedArcMap,
+  });
+
+  return {
+    title: "Impedance-Freeness",
+    instances: [mainInstance, sharedArcInstance, ...casInstances],
+  };
+}
+
+function checkImpedanceFreeness(casSet) {
+  // Count how many CAS use each arc
+  const arcUsageMap = new Map();
+  // "from.id->to.id" → { fromId, toId, L, casIndices[] }
+
+  for (let i = 0; i < casSet.length; i++) {
+    for (const edge of casSet[i].edges) {
+      const key = `${edge.from.id}->${edge.to.id}`;
+      if (!arcUsageMap.has(key)) {
+        arcUsageMap.set(key, {
+          fromId: edge.from.id,
+          toId: edge.to.id,
+          L: edge.maxTraversals ?? 1,
+          casIndices: [],
+        });
+      }
+      arcUsageMap.get(key).casIndices.push(i + 1);
+    }
+  }
+
+  const violatingArcKeys = [];
+  const criteria = [];
+
+  for (const [key, { fromId, toId, L, casIndices }] of arcUsageMap.entries()) {
+    const usageCount = casIndices.length;
+
+    if (usageCount > L) {
+      // More CAS use this arc than its L-value allows:
+      // the composite activity would be blocked here.
+      violatingArcKeys.push(key);
+      criteria.push({
+        pass: false,
+        description:
+          `Arc ${fromId}→${toId} (L=${L}) is shared by ${usageCount} Maximal Activities: ` +
+          `${casIndices.join(", ")}] — composite activity blocked (impedance)`,
+      });
+    } else {
+      criteria.push({
+        pass: true,
+        description: `Arc ${fromId}→${toId} (L=${L}), used by ${usageCount} Maximal Activities — no impedance`,
+      });
+    }
+  }
+
+  return {
+    pass: violatingArcKeys.length === 0,
+    violatingArcKeys,
+    criteria,
+  };
+}
+
+function unreachableResult() {
   return {
     title: "Impedance-Freeness",
     instances: [
@@ -114,11 +237,39 @@ export function verifyImpedanceFreeness(simpleModel, source, sink) {
         name: "Main Model",
         evaluation: {
           conclusion: {
-            pass,
-            title: pass ? "Impedance-Free" : "Not Impedance-Free",
-            description: ``,
+            pass: false,
+            title: "Not Impedance-Free",
+            description:
+              "No maximal activities could be derived — sink is unreachable.",
           },
-          //   criteria,
+          criteria: [],
+          violating: { arcs: [], vertices: [] },
+        },
+      },
+    ],
+  };
+}
+
+function singleCASResult() {
+  return {
+    title: "Impedance-Freeness",
+    instances: [
+      {
+        name: "Main Model",
+        evaluation: {
+          conclusion: {
+            pass: true,
+            title: "Impedance-Free",
+            description:
+              "Only one maximal activity exists — no pair to impede each other.",
+          },
+          criteria: [
+            {
+              pass: true,
+              description:
+                "Single maximal activity — impedance-free by definition.",
+            },
+          ],
           violating: { arcs: [], vertices: [] },
         },
       },
@@ -372,4 +523,300 @@ function mapToGraphs(rdlt, R2, R1) {
   }
 
   return { rdltGraph, r2Graphs, r1Graph };
+}
+
+function casToActivityEdges(casGraph) {
+  // casGraph is expected to be a Graph with .edges
+  // Return a stable ordered list (best-effort).
+  // If CASExtractor already orders edges, keep that; else we sort by from/to names.
+  const edges = Array.isArray(casGraph?.edges) ? [...casGraph.edges] : [];
+
+  // Try to preserve original order; only sort if order seems arbitrary
+  // (optional: comment out sort if CASExtractor guarantees order)
+  edges.sort((a, b) => {
+    const aKey = `${a.from?.name ?? a.from?.id}->${a.to?.name ?? a.to?.id}`;
+    const bKey = `${b.from?.name ?? b.from?.id}->${b.to?.name ?? b.to?.id}`;
+    return aKey.localeCompare(bKey);
+  });
+
+  return edges.map((e) => ({
+    from: e.from?.name ?? String(e.from?.id),
+    to: e.to?.name ?? String(e.to?.id),
+    C: e.constraint ?? e.cAttribute ?? e.C ?? "",
+    L: e.maxTraversals ?? e.l ?? e.L ?? e.lAttribute ?? 1,
+  }));
+}
+
+function summarizeActivities(casSet) {
+  // returns [{ index, label, edges:[{from,to,C,L}] }]
+  return casSet.map((casGraph, i) => {
+    const edges = casToActivityEdges(casGraph);
+
+    // “x1→x6, x6→x9, …” label
+    const label = edges.length
+      ? edges.map((e) => `${e.from}→${e.to}`).join(" ")
+      : "(empty)";
+
+    return { index: i + 1, label, edges };
+  });
+}
+
+function computeSharedArcs(casSet) {
+  // Keyed by "x1->x2"
+  const usage = new Map();
+
+  for (let i = 0; i < casSet.length; i++) {
+    const edges = casToActivityEdges(casSet[i]);
+    for (const e of edges) {
+      const key = `${e.from}->${e.to}`;
+      if (!usage.has(key)) {
+        usage.set(key, {
+          key,
+          from: e.from,
+          to: e.to,
+          L: e.L ?? 1,
+          usedBy: [],
+        });
+      }
+      usage.get(key).usedBy.push(i + 1);
+    }
+  }
+
+  // Keep only arcs used by 2+ CAS
+  const shared = [...usage.values()].filter((x) => x.usedBy.length >= 2);
+
+  // Sort for stable UI
+  shared.sort((a, b) => a.key.localeCompare(b.key));
+
+  return shared;
+}
+
+function normalizeCASLValues(casSet, originalRDLT, R2Graph) {
+  // R2 vertex IDs (identifier scheme like "x2", "x4")
+  const r2VertexIds = new Set((R2Graph?.vertices ?? []).map((v) => v.id));
+
+  // Build L lookup for original RDLT edges by NAME (identifier) and by ID
+  const originalL = new Map();
+  for (const e of originalRDLT?.edges ?? []) {
+    const kName = `${e.from?.name ?? e.from?.id}->${e.to?.name ?? e.to?.id}`;
+    const kId = `${e.from?.id}->${e.to?.id}`;
+    const L = e.maxTraversals ?? e.l ?? e.L ?? e.lAttribute;
+    if (L != null) {
+      if (!originalL.has(kName)) originalL.set(kName, L);
+      if (!originalL.has(kId)) originalL.set(kId, L);
+    }
+  }
+
+  // Build L lookup for R2Graph edges by ID (already identifier scheme)
+  const r2L = new Map();
+  for (const e of R2Graph?.edges ?? []) {
+    const k = `${e.from?.id}->${e.to?.id}`;
+    const L = e.maxTraversals ?? e.l ?? e.L ?? e.lAttribute;
+    if (L != null) r2L.set(k, L);
+  }
+
+  // Rewrite CAS edges' maxTraversals
+  return (casSet ?? []).map((cas) => {
+    const out = new Graph();
+    out.vertices = [...(cas.vertices ?? [])];
+    out.edges = (cas.edges ?? []).map((edge) => {
+      const edgeCopy = { ...edge };
+
+      const fromId = edge.from?.id;
+      const toId = edge.to?.id;
+      const fromName = edge.from?.name ?? fromId;
+      const toName = edge.to?.name ?? toId;
+
+      const insideRBS = r2VertexIds.has(fromId) && r2VertexIds.has(toId);
+
+      if (insideRBS) {
+        // Prefer R2Graph's L (this fixes x2→x4)
+        const k = `${fromId}->${toId}`;
+        const L = r2L.get(k);
+        if (L != null) edgeCopy.maxTraversals = L;
+      } else {
+        // Outside: restore from original RDLT by name-key (handles UID mismatch)
+        const kName = `${fromName}->${toName}`;
+        const kId = `${fromId}->${toId}`;
+        const L = originalL.get(kName) ?? originalL.get(kId);
+        if (L != null) edgeCopy.maxTraversals = L;
+      }
+
+      return edgeCopy;
+    });
+
+    return out;
+  });
+}
+
+// --- helper: build "fromUID, toUID" -> [arcObj...] like soundness-service does ---
+function transformArcMapLocal(arcMap) {
+  const out = Object.create(null);
+  for (const uidStr of Object.keys(arcMap || {})) {
+    const arc = arcMap[uidStr];
+    if (!arc) continue;
+    const k = `${arc.fromVertexUID}, ${arc.toVertexUID}`;
+    (out[k] ||= []).push(arc);
+  }
+  return out;
+}
+
+function findVertexUIDByIdentifier(vertexMap, identifier) {
+  // vertexMap is keyed by UID (string/number), each entry has .identifier
+  for (const uid of Object.keys(vertexMap || {})) {
+    if (vertexMap[uid]?.identifier === identifier) return uid;
+  }
+  return null;
+}
+
+function findArcUIDByIdentifiers({
+  fromId,
+  toId,
+  vertexMap,
+  arcMap,
+  transformedArcMap,
+}) {
+  const fromUID = findVertexUIDByIdentifier(vertexMap, fromId);
+  const toUID = findVertexUIDByIdentifier(vertexMap, toId);
+  if (!fromUID || !toUID) return null;
+
+  const arcKey = `${fromUID}, ${toUID}`;
+  const candidates = transformedArcMap[arcKey];
+  if (!candidates || candidates.length === 0) return null;
+
+  // If multiple arcs exist between same endpoints, pick the first.
+  // (If you later need constraint-aware matching, we can refine this.)
+  return candidates[0].uid;
+}
+
+/**
+ * Build arcOverrides to force the UI to display the CAS L-values.
+ * This is the missing piece causing "L=1" in UI even when CAS has L=2.
+ */
+function buildArcOverridesFromCAS(
+  casGraph,
+  { vertexMap, arcMap, transformedArcMap },
+) {
+  const arcOverrides = {};
+  for (const edge of casGraph?.edges ?? []) {
+    const fromId = edge.from?.id ?? edge.from;
+    const toId = edge.to?.id ?? edge.to;
+
+    const arcUID = findArcUIDByIdentifiers({
+      fromId,
+      toId,
+      vertexMap,
+      arcMap,
+      transformedArcMap,
+    });
+
+    if (!arcUID) continue;
+
+    const originalArc = arcMap[arcUID];
+    arcOverrides[arcUID] = {
+      C: originalArc?.C ?? "ϵ",
+      // Force the CAS edge L-value into the renderer
+      L: edge.maxTraversals ?? edge.L ?? edge.l ?? 1,
+    };
+  }
+  return arcOverrides;
+}
+
+/**
+ * Optional: limit the drawn model to only vertices/arcs used by a CAS.
+ * This gives you a clean "generated activity" view.
+ */
+function graphToUIDsLocal(graph, { vertexMap, arcMap, transformedArcMap }) {
+  const vertexUIDs = [];
+  const arcUIDs = [];
+
+  // vertices: CAS vertex IDs are identifiers like "x2"
+  for (const v of graph?.vertices ?? []) {
+    const id = v?.id ?? v;
+    const uid = findVertexUIDByIdentifier(vertexMap, id);
+    if (uid) vertexUIDs.push(Number(uid));
+  }
+
+  // arcs: map CAS edges to GUI arc UIDs
+  for (const e of graph?.edges ?? []) {
+    const fromId = e.from?.id ?? e.from;
+    const toId = e.to?.id ?? e.to;
+    const arcUID = findArcUIDByIdentifiers({
+      fromId,
+      toId,
+      vertexMap,
+      arcMap,
+      transformedArcMap,
+    });
+    if (arcUID) arcUIDs.push(Number(arcUID));
+  }
+
+  return { vertices: vertexUIDs, arcs: arcUIDs };
+}
+
+function buildSharedArcInstance(sharedArcs, sharedArcUIDs) {
+  // sharedArcs: [{from,to,L,usedBy:[...]}]
+  const remarks = {};
+  for (let i = 0; i < sharedArcUIDs.length; i++) {
+    const arcUID = sharedArcUIDs[i];
+    const meta = sharedArcs[i];
+    if (!meta) continue;
+    remarks[arcUID] = `Used by Maximal Activities ${meta.usedBy.join(", ")} (L=${meta.L})`;
+  }
+
+  return {
+    name: "Shared Arcs",
+    evaluation: {
+      conclusion: {
+        pass: false,
+        title: "Shared Arc(s)",
+        description: "Arcs shared across 2+ generated activities.",
+      },
+      criteria: [],
+      violating: { arcs: sharedArcUIDs, vertices: [] },
+      violatingRemarks: { arcs: remarks, vertices: {} },
+    },
+  };
+}
+
+function buildCASInstances(casSet, { vertexMap, arcMap, transformedArcMap }) {
+  return casSet.map((cas, i) => {
+    const arcOverrides = buildArcOverridesFromCAS(cas, {
+      vertexMap,
+      arcMap,
+      transformedArcMap,
+    });
+
+    // Put edges in criteria so they appear in the Result panel table
+    const criteria = (cas?.edges ?? []).map((e) => {
+      const fromId = e.from?.id ?? e.from;
+      const toId = e.to?.id ?? e.to;
+      const L = e.maxTraversals ?? e.L ?? e.l ?? 1;
+      return {
+        pass: true,
+        description: `Arc ${fromId}→${toId} (L=${L})`,
+      };
+    });
+
+    return {
+      name: `Maximal Activity ${i + 1}`,
+      evaluation: {
+        conclusion: {
+          pass: true,
+          title: `Generated Maximal Activity ${i + 1}`,
+          description: "Maximal Activity derived from the model.",
+        },
+        criteria,
+        violating: { arcs: [], vertices: [] },
+        violatingRemarks: { arcs: {}, vertices: {} },
+      },
+      model: graphToUIDsLocal(cas, { vertexMap, arcMap, transformedArcMap }),
+      options: {
+        suppressRBS: true,
+        forceControllerType: true,
+        useModelStyling: true,
+        arcOverrides,
+      },
+    };
+  });
 }
