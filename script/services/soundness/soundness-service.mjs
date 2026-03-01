@@ -77,7 +77,7 @@ function getOutBridges(model, arcMap, vertexMap) {
     return outBridges;
 }
 
-function mapGUIModelToSoundness(model, source, sink){
+export function mapGUIModelToSoundness(model, source, sink){
     const arcMap = buildArcMap(model.arcs);
     const vertexMap = buildVertexMap(model.components);
 

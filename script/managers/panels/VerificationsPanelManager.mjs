@@ -1,6 +1,7 @@
 import { verifyFreeChoiceness } from "../../services/free-choiceness.mjs";
 import { verifyWellHandledness } from "../../services/well-handledness.mjs";
 import { verifySoundness } from "../../services/soundness/soundness-service.mjs";
+import { verifyImpedanceFreeness } from "../../services/impedance-freeness.mjs";
 import { Form } from "../../utils.mjs";
 import ModelContext from "../model/ModelContext.mjs";
 
@@ -40,6 +41,7 @@ export default class VerificationsPanelManager {
       poi: {},
       freeChoiceness: {},
       wellHandledness: {},
+      impedanceFreeness: {},
       soundness: {},
     },
   };
@@ -49,11 +51,14 @@ export default class VerificationsPanelManager {
    *      poi: Form,
    *      freeChoiceness: Form,
    *      wellHandledness: Form,
+   *      impedanceFreeness: Form,
+   *      soundness: Form,
    * }}
    */
   #forms = {
     poi: null,
     freeChoiceness: null,
+    impedanceFreeness: null,
     soundness: null,
     wellHandledness: null,
   };
@@ -74,6 +79,7 @@ export default class VerificationsPanelManager {
     this.#initializeFreeChoicenessSection();
     this.#initializeWellHandlednessSection();
     this.#initializeSoundnessSection();
+    this.#initializeImpedanceFreenessSection();
   }
 
   #initializeForms() {
@@ -82,48 +88,54 @@ export default class VerificationsPanelManager {
       "sink",
     ]);
     this.#views.selectors.sources.push(
-      this.#forms.poi.getFieldElement("source")
+      this.#forms.poi.getFieldElement("source"),
     );
     this.#views.selectors.sinks.push(this.#forms.poi.getFieldElement("sink"));
 
     this.#forms.freeChoiceness = new Form(
-      this.#views.sections.freeChoiceness.root
+      this.#views.sections.freeChoiceness.root,
     ).setFieldNames(["source", "sink", "type"]);
 
     this.#forms.wellHandledness = new Form(
-      this.#views.sections.wellHandledness.root
+      this.#views.sections.wellHandledness.root,
+    ).setFieldNames(["source", "sink", "type"]);
+
+    this.#forms.impedanceFreeness = new Form(
+      this.#views.sections.impedanceFreeness.root,
     ).setFieldNames(["source", "sink", "type"]);
 
     this.#views.selectors.sources.push(
       this.#forms.freeChoiceness.getFieldElement("source"),
-      this.#forms.wellHandledness.getFieldElement("source")
+      this.#forms.wellHandledness.getFieldElement("source"),
+      this.#forms.impedanceFreeness.getFieldElement("source"),
     );
     this.#views.selectors.sinks.push(
       this.#forms.freeChoiceness.getFieldElement("sink"),
-      this.#forms.wellHandledness.getFieldElement("sink")
+      this.#forms.wellHandledness.getFieldElement("sink"),
+      this.#forms.impedanceFreeness.getFieldElement("sink"),
     );
 
     // Soundness form elements
     this.#forms.soundness = new Form(
-      this.#views.sections.soundness.root
+      this.#views.sections.soundness.root,
     ).setFieldNames(["source", "sink", "notion"]);
     this.#views.selectors.sources.push(
-      this.#forms.soundness.getFieldElement("source")
+      this.#forms.soundness.getFieldElement("source"),
     );
     this.#views.selectors.sinks.push(
-      this.#forms.soundness.getFieldElement("sink")
+      this.#forms.soundness.getFieldElement("sink"),
     );
   }
 
   #initializePOISection() {
     const sectionRoot = this.#rootElement.querySelector(
-      "[data-section-id='poi']"
+      "[data-section-id='poi']",
     );
     const sectionViews = this.#views.sections.poi;
 
     sectionViews.root = sectionRoot;
     sectionViews.startButton = sectionRoot.querySelector(
-      "button[data-subaction='start']"
+      "button[data-subaction='start']",
     );
     sectionViews.startButton.addEventListener("click", async () => {
       const { source, sink } = this.#forms.poi.getValues();
@@ -140,13 +152,13 @@ export default class VerificationsPanelManager {
 
   #initializeFreeChoicenessSection() {
     const sectionRoot = this.#rootElement.querySelector(
-      "[data-section-id='fc']"
+      "[data-section-id='fc']",
     );
     const sectionViews = this.#views.sections.freeChoiceness;
 
     sectionViews.root = sectionRoot;
     sectionViews.startButton = sectionRoot.querySelector(
-      "button[data-subaction='start']"
+      "button[data-subaction='start']",
     );
     sectionViews.startButton.addEventListener("click", () => {
       const { source, sink, type } = this.#forms.freeChoiceness.getValues();
@@ -159,20 +171,20 @@ export default class VerificationsPanelManager {
 
       this.context.managers.workspace.showVerificationResults(
         result,
-        modelSnapshot
+        modelSnapshot,
       );
     });
   }
 
   #initializeSoundnessSection() {
     const sectionRoot = this.#rootElement.querySelector(
-      "[data-section-id='soundness']"
+      "[data-section-id='soundness']",
     );
     const sectionViews = this.#views.sections.soundness;
 
     sectionViews.root = sectionRoot;
     sectionViews.startButton = sectionRoot.querySelector(
-      "button[data-subaction='start']"
+      "button[data-subaction='start']",
     );
     sectionViews.startButton.addEventListener("click", () => {
       const { source, sink, notion } = this.#forms.soundness.getValues();
@@ -185,20 +197,20 @@ export default class VerificationsPanelManager {
 
       this.context.managers.workspace.showVerificationResults(
         result,
-        modelSnapshot
+        modelSnapshot,
       );
     });
   }
 
   #initializeWellHandlednessSection() {
     const sectionRoot = this.#rootElement.querySelector(
-      "[data-section-id='wh']"
+      "[data-section-id='wh']",
     );
     const sectionViews = this.#views.sections.wellHandledness;
 
     sectionViews.root = sectionRoot;
     sectionViews.startButton = sectionRoot.querySelector(
-      "button[data-subaction='start']"
+      "button[data-subaction='start']",
     );
     sectionViews.startButton.addEventListener("click", () => {
       const { source, sink, type } = this.#forms.wellHandledness.getValues();
@@ -211,13 +223,39 @@ export default class VerificationsPanelManager {
         simpleModel,
         source,
         sink,
-        type
+        type,
       );
       console.log("Verification complete", result);
       this.context.managers.workspace.showVerificationResults(
         result,
         modelSnapshot,
-        activityProfile
+        activityProfile,
+      );
+    });
+  }
+
+  #initializeImpedanceFreenessSection() {
+    const sectionRoot = this.#rootElement.querySelector(
+      "[data-section-id='impedance-freeness']",
+    );
+    const sectionViews = this.#views.sections.impedanceFreeness;
+
+    sectionViews.root = sectionRoot;
+    sectionViews.startButton = sectionRoot.querySelector(
+      "button[data-subaction='start']",
+    );
+    sectionViews.startButton.addEventListener("click", () => {
+      const { source, sink, type } = this.#forms.impedanceFreeness.getValues();
+      if (!source || !sink) return;
+
+      const modelSnapshot = this.context.managers.visualModel.makeCopy();
+      const simpleModel = modelSnapshot.toSimpleModel();
+
+      const result = verifyImpedanceFreeness(simpleModel, source, sink);
+      console.log("Verification complete", result);
+      this.context.managers.workspace.showVerificationResults(
+        result,
+        modelSnapshot,
       );
     });
   }
@@ -232,7 +270,7 @@ export default class VerificationsPanelManager {
       element.innerHTML = potentialSourceVertices
         .map(
           (vertex) =>
-            `<option value="${vertex.uid}">${vertex.identifier}</option>`
+            `<option value="${vertex.uid}">${vertex.identifier}</option>`,
         )
         .join("");
     }
@@ -241,7 +279,7 @@ export default class VerificationsPanelManager {
       element.innerHTML = potentialSinkVertices
         .map(
           (vertex) =>
-            `<option value="${vertex.uid}">${vertex.identifier}</option>`
+            `<option value="${vertex.uid}">${vertex.identifier}</option>`,
         )
         .join("");
     }
