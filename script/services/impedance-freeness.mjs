@@ -211,13 +211,13 @@ function checkImpedanceFreeness(casSet) {
       criteria.push({
         pass: false,
         description:
-          `Arc ${fromId}→${toId} (L=${L}) is shared by ${usageCount} Maximal Activities: ` +
+          `Arc ${fromId}→${toId} (L=${L}) is shared by ${usageCount} Activities: ` +
           `${casIndices.join(", ")}] — composite activity blocked (impedance)`,
       });
     } else {
       criteria.push({
         pass: true,
-        description: `Arc ${fromId}→${toId} (L=${L}), used by ${usageCount} Maximal Activities — no impedance`,
+        description: `Arc ${fromId}→${toId} (L=${L}), used by ${usageCount} Activities — no impedance`,
       });
     }
   }
@@ -240,7 +240,7 @@ function unreachableResult() {
             pass: false,
             title: "Not Impedance-Free",
             description:
-              "No maximal activities could be derived — sink is unreachable.",
+              "No activities could be derived — sink is unreachable.",
           },
           criteria: [],
           violating: { arcs: [], vertices: [] },
@@ -261,13 +261,13 @@ function singleCASResult() {
             pass: true,
             title: "Impedance-Free",
             description:
-              "Only one maximal activity exists — no pair to impede each other.",
+              "Only one activity exists — no pair to impede each other.",
           },
           criteria: [
             {
               pass: true,
               description:
-                "Single maximal activity — impedance-free by definition.",
+                "Single activity — impedance-free by definition.",
             },
           ],
           violating: { arcs: [], vertices: [] },
@@ -761,7 +761,7 @@ function buildSharedArcInstance(sharedArcs, sharedArcUIDs) {
     const arcUID = sharedArcUIDs[i];
     const meta = sharedArcs[i];
     if (!meta) continue;
-    remarks[arcUID] = `Used by Maximal Activities ${meta.usedBy.join(", ")} (L=${meta.L})`;
+    remarks[arcUID] = `Used by Activities ${meta.usedBy.join(", ")} (L=${meta.L})`;
   }
 
   return {
@@ -799,12 +799,12 @@ function buildCASInstances(casSet, { vertexMap, arcMap, transformedArcMap }) {
     });
 
     return {
-      name: `Maximal Activity ${i + 1}`,
+      name: `Activity ${i + 1}`,
       evaluation: {
         conclusion: {
           pass: true,
-          title: `Generated Maximal Activity ${i + 1}`,
-          description: "Maximal Activity derived from the model.",
+          title: `Generated Activity ${i + 1}`,
+          description: "Activity derived from the model.",
         },
         criteria,
         violating: { arcs: [], vertices: [] },
