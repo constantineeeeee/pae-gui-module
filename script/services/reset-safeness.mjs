@@ -96,12 +96,12 @@ export function verifyResetSafeness(simpleModel, source, sink) {
     return unreachableResultResetSafe();
   }
 
-  // ---- IMPORTANT: keep only MAXIMAL activities (remove strict subsets) ----
-  const maximalActivities = keepOnlyMaximalCAS(normalizedCAS);
-
-  // If still 0/1, reset-safeness is trivially satisfied (no pair to compare)
-  if (maximalActivities.length === 1) {
-    return singleActivityResetSafeResult(maximalActivities, {
+  // All extracted activities are checked as pairs. A naive edge-set subset
+  // filter would incorrectly drop one activity when two activities share the
+  // same RBS sub-path but enter via different in-bridges — exactly the case
+  // that needs a reset-safeness check.
+  if (normalizedCAS.length === 1) {
+    return singleActivityResetSafeResult(normalizedCAS, {
       vertexMap,
       arcMap,
     });
@@ -112,7 +112,7 @@ export function verifyResetSafeness(simpleModel, source, sink) {
   const check = checkResetSafeness({
     rdltGraph,
     rbsList,
-    maximalActivities,
+    maximalActivities: normalizedCAS,
   });
 
   // Convert violating arc keys to GUI arc UIDs so the renderer can highlight them
@@ -147,8 +147,9 @@ export function verifyResetSafeness(simpleModel, source, sink) {
     },
   };
 
-  // Optional: show the maximal activities in the results panel (like your impedance-freeness UI)
-  const casInstances = buildCASInstances(maximalActivities, {
+  // Show ALL normalized activities in the UI (same as impedance-freeness),
+  // not just the maximal subset used for the check.
+  const casInstances = buildCASInstances(normalizedCAS, {
     vertexMap,
     arcMap,
     transformedArcMap,
@@ -169,7 +170,7 @@ function checkResetSafeness({ rdltGraph, rbsList, maximalActivities }) {
   const violatingArcKeys = new Set();
   let pass = true;
 
-  // Precompute per activity: ordered edge list (time = edge index)
+  // Precompute per activity: ordered edge list (time = edge index along the path)
   const orderedActivities = maximalActivities.map((cas) =>
     orderCASEdgesAsPath(cas),
   );
@@ -178,28 +179,52 @@ function checkResetSafeness({ rdltGraph, rbsList, maximalActivities }) {
   for (let gIndex = 0; gIndex < rbsList.length; gIndex++) {
     const G = rbsList[gIndex];
 
-    const gVertices = new Set(
-      (G.members ?? []).map((v) => v?.id ?? v).filter((x) => x != null),
-    );
-    const gCenter = G.center?.id ?? G.center;
-    if (gCenter != null) gVertices.add(gCenter);
+    // Collect all vertex IDs AND names that belong to G (center + members).
+    // IMPORTANT: rdltGraph vertex IDs are UIDs (e.g. "5"), but CAS edges from
+    // CASExtractor use identifier strings (e.g. "x", "c1") as their vertex IDs.
+    // We must build gVertices covering BOTH schemes so that arc key lookups work
+    // regardless of which ID scheme an edge uses.
+    const gVertices = new Set();
+    for (const v of G.members ?? []) {
+      if (v?.id != null) gVertices.add(String(v.id));       // UID
+      if (v?.name != null) gVertices.add(String(v.name));   // identifier string
+    }
+    const gCenter = G.center;
+    if (gCenter?.id != null) gVertices.add(String(gCenter.id));
+    if (gCenter?.name != null) gVertices.add(String(gCenter.name));
 
-    // Build internal/out-bridge arc key sets for quick checks
+    // Build arc key sets in BOTH UID-based and name-based forms so they match
+    // regardless of whether the edges come from rdltGraph (UIDs) or CAS (names).
     const internalKeys = new Set();
     const outBridgeKeys = new Set();
+    const activeInGKeys = new Set(); // internal ∪ out-bridge — "from inside G"
 
     for (const e of rdltGraph.edges ?? []) {
-      const fromId = e.from?.id ?? e.from;
-      const toId = e.to?.id ?? e.to;
-      const inFrom = gVertices.has(fromId);
-      const inTo = gVertices.has(toId);
+      // Each rdltGraph edge has UID-based vertex IDs; its vertices also carry .name
+      const fromUID = e.from?.id != null ? String(e.from.id) : null;
+      const fromName = e.from?.name != null ? String(e.from.name) : null;
+      const toUID = e.to?.id != null ? String(e.to.id) : null;
+      const toName = e.to?.name != null ? String(e.to.name) : null;
 
-      const k = `${fromId}->${toId}`;
-      if (inFrom && inTo) internalKeys.add(k);
-      if (inFrom && !inTo) outBridgeKeys.add(k);
+      const inFrom = (fromUID && gVertices.has(fromUID)) || (fromName && gVertices.has(fromName));
+      const inTo = (toUID && gVertices.has(toUID)) || (toName && gVertices.has(toName));
+
+      // Add BOTH the UID-based key and the name-based key so CAS edges match
+      const uidKey = fromUID && toUID ? `${fromUID}->${toUID}` : null;
+      const nameKey = fromName && toName ? `${fromName}->${toName}` : null;
+
+      if (inFrom && inTo) {
+        if (uidKey) { internalKeys.add(uidKey); activeInGKeys.add(uidKey); }
+        if (nameKey) { internalKeys.add(nameKey); activeInGKeys.add(nameKey); }
+      }
+      if (inFrom && !inTo) {
+        if (uidKey) { outBridgeKeys.add(uidKey); activeInGKeys.add(uidKey); }
+        if (nameKey) { outBridgeKeys.add(nameKey); activeInGKeys.add(nameKey); }
+      }
     }
 
-    // If no out-bridge exists, simultaneous use cannot be safely reset (practically fail if overlap occurs)
+    // If no out-bridge exists, any simultaneous use of G is automatically a failure
+    // because neither activity can ever safely exit G and trigger a clean reset.
     const gHasOutBridge = outBridgeKeys.size > 0;
 
     for (let i = 0; i < orderedActivities.length; i++) {
@@ -207,75 +232,115 @@ function checkResetSafeness({ rdltGraph, rbsList, maximalActivities }) {
         const A = orderedActivities[i];
         const B = orderedActivities[j];
 
-        const aIn = timelineInG(A, internalKeys);
-        const bIn = timelineInG(B, internalKeys);
+        // Build bitmaps: does the activity "use G" at each timestep?
+        // Using activeInGKeys (from-inside-G) correctly captures the window
+        // during which the activity is executing inside the RBS.
+        const aIn = timelineActiveInG(A, activeInGKeys);
+        const bIn = timelineActiveInG(B, activeInGKeys);
 
         const aUses = aIn.some(Boolean);
         const bUses = bIn.some(Boolean);
 
-        // Case (3): both do not use G at all
+        // Case (3): neither activity uses G at all → reset-safe for this pair/RBS
         if (!aUses && !bUses) {
           criteria.push({
             pass: true,
             description: `RBS ${labelRBS(G, gIndex)} — Activities ${i + 1} and ${
               j + 1
-            } do not use this RBS.`,
+            } do not use this RBS at all.`,
           });
           continue;
         }
 
-        // Compute overlap times where both are inside G at the same time
+        // Case (3) asymmetric: only one uses G → the other never enters,
+        // so they cannot interfere with each other inside G.
+        if (!aUses || !bUses) {
+          criteria.push({
+            pass: true,
+            description: `RBS ${labelRBS(G, gIndex)} — Only one of Activities ${
+              i + 1
+            } and ${j + 1} uses this RBS; the other does not enter it at all.`,
+          });
+          continue;
+        }
+
+        // Both use G. Find intervals where both are SIMULTANEOUSLY inside G.
+        // We must not truncate by Math.min — pad the shorter timeline with false.
         const overlaps = overlapIntervals(aIn, bIn);
 
-        // Case (2): they do not use G at the same time
+        // Case (2): they never use G at the same time → reset-safe for this pair/RBS
         if (overlaps.length === 0) {
           criteria.push({
             pass: true,
             description: `RBS ${labelRBS(G, gIndex)} — Activities ${i + 1} and ${
               j + 1
-            } do not use this RBS at the same time.`,
+            } both use this RBS but never at the same time.`,
           });
           continue;
         }
 
-        // Case (1): if overlap, must exit out-bridge at same timestep
-        const aExitTimes = exitTimes(A, outBridgeKeys);
-        const bExitTimes = exitTimes(B, outBridgeKeys);
+        // Case (1): they DO overlap inside G.
+        // Per the formal definition, they must BOTH exit an out-bridge of G
+        // at the same timestep (i.e. the same number of steps from the start
+        // of the activity, which corresponds to equal path-lengths from the
+        // looping-arc source to the out-bridge vertex).
+        //
+        // We check: for each overlap interval, the first out-bridge exit of A
+        // at-or-after the overlap start equals the first out-bridge exit of B
+        // at-or-after the overlap start.
+
+        if (!gHasOutBridge) {
+          // No out-bridge → activities can never satisfy the simultaneous-exit
+          // condition → automatically not reset-safe.
+          pass = false;
+          collectViolatingArcs(A, B, internalKeys, outBridgeKeys, overlaps, violatingArcKeys);
+          criteria.push({
+            pass: false,
+            description: `RBS ${labelRBS(G, gIndex)} — Activities ${i + 1} and ${
+              j + 1
+            } overlap inside RBS but no out-bridge exists to exit from (NOT reset-safe).`,
+          });
+          continue;
+        }
+
+        const aExitTimes = exitTimesFromActivity(A, outBridgeKeys);
+        const bExitTimes = exitTimesFromActivity(B, outBridgeKeys);
 
         let pairOK = true;
+        const pairViolatingKeys = new Set();
 
         for (const [tStart, tEnd] of overlaps) {
           const exitA = firstExitAtOrAfter(aExitTimes, tStart);
           const exitB = firstExitAtOrAfter(bExitTimes, tStart);
 
-          // If G has no outbridge, any overlap is a failure
-          if (!gHasOutBridge) {
-            pairOK = false;
-            pass = false;
-            // mark internal overlap edges (best effort) as violating
-            markOverlapInternalEdgesAsViolating(A, internalKeys, tStart, tEnd, violatingArcKeys);
-            markOverlapInternalEdgesAsViolating(B, internalKeys, tStart, tEnd, violatingArcKeys);
-            break;
-          }
-
+          // Both must exit, and they must exit at the same timestep index.
           if (exitA == null || exitB == null || exitA !== exitB) {
             pairOK = false;
-            pass = false;
 
-            // Mark the out-bridge edges used at those exits as violating (best effort)
+            // Collect the out-bridge arcs they actually traverse (if any)
             if (exitA != null) {
               const kA = edgeKeyAt(A, exitA);
-              if (kA) violatingArcKeys.add(kA);
+              if (kA) pairViolatingKeys.add(kA);
             }
             if (exitB != null) {
               const kB = edgeKeyAt(B, exitB);
-              if (kB) violatingArcKeys.add(kB);
+              if (kB) pairViolatingKeys.add(kB);
             }
 
-            // Also mark overlap internal edges as violating context (helps user see where the overlap happens)
-            markOverlapInternalEdgesAsViolating(A, internalKeys, tStart, tEnd, violatingArcKeys);
-            markOverlapInternalEdgesAsViolating(B, internalKeys, tStart, tEnd, violatingArcKeys);
+            // Also highlight the overlapping internal arcs so the user can
+            // see WHERE the conflicting simultaneous traversal occurs.
+            for (let t = tStart; t <= tEnd; t++) {
+              const kA = edgeKeyAt(A, t);
+              if (kA && internalKeys.has(kA)) pairViolatingKeys.add(kA);
+              const kB = edgeKeyAt(B, t);
+              if (kB && internalKeys.has(kB)) pairViolatingKeys.add(kB);
+            }
           }
+        }
+
+        if (!pairOK) {
+          pass = false;
+          for (const k of pairViolatingKeys) violatingArcKeys.add(k);
         }
 
         criteria.push({
@@ -283,7 +348,7 @@ function checkResetSafeness({ rdltGraph, rbsList, maximalActivities }) {
           description: pairOK
             ? `RBS ${labelRBS(G, gIndex)} — Activities ${i + 1} and ${
                 j + 1
-              } overlap inside RBS but exit at the same timestep (reset-safe for this pair).`
+              } overlap inside RBS and exit its out-bridge at the same timestep (reset-safe).`
             : `RBS ${labelRBS(G, gIndex)} — Activities ${i + 1} and ${
                 j + 1
               } overlap inside RBS but do NOT exit its out-bridge at the same timestep (NOT reset-safe).`,
@@ -303,6 +368,20 @@ function labelRBS(G, idx) {
   const center = G?.center?.name ?? G?.center?.id ?? G?.center;
   if (center != null) return `with center ${center}`;
   return `#${idx + 1}`;
+}
+
+/**
+ * Collect violating arc keys for the no-out-bridge failure case.
+ */
+function collectViolatingArcs(A, B, internalKeys, outBridgeKeys, overlaps, violatingArcKeys) {
+  for (const [tStart, tEnd] of overlaps) {
+    for (let t = tStart; t <= tEnd; t++) {
+      const kA = edgeKeyAt(A, t);
+      if (kA && internalKeys.has(kA)) violatingArcKeys.add(kA);
+      const kB = edgeKeyAt(B, t);
+      if (kB && internalKeys.has(kB)) violatingArcKeys.add(kB);
+    }
+  }
 }
 
 /* ====================================================================== */
@@ -415,33 +494,46 @@ function edgeKeyAt(orderedEdges, t) {
   return `${fromId}->${toId}`;
 }
 
-function timelineInG(orderedEdges, internalKeys) {
-  // inG[t] = whether edge at time t is an internal edge of G
+/**
+ * Build a boolean timeline: activeInGKeys[t] = true if at timestep t the
+ * activity is executing an arc whose FROM vertex is inside G (internal arc
+ * or out-bridge). This correctly captures the window where the activity is
+ * "inside" the RBS — including the moment it exits via an out-bridge.
+ */
+function timelineActiveInG(orderedEdges, activeInGKeys) {
   return orderedEdges.map((e) => {
     const fromId = e.from?.id ?? e.from;
     const toId = e.to?.id ?? e.to;
-    return internalKeys.has(`${fromId}->${toId}`);
+    return activeInGKeys.has(`${fromId}->${toId}`);
   });
 }
 
-function exitTimes(orderedEdges, outBridgeKeys) {
+/**
+ * Collect timestep indices where the activity traverses an out-bridge of G.
+ */
+function exitTimesFromActivity(orderedEdges, outBridgeKeys) {
   const times = [];
   for (let t = 0; t < orderedEdges.length; t++) {
     const fromId = orderedEdges[t].from?.id ?? orderedEdges[t].from;
     const toId = orderedEdges[t].to?.id ?? orderedEdges[t].to;
-    const k = `${fromId}->${toId}`;
-    if (outBridgeKeys.has(k)) times.push(t);
+    if (outBridgeKeys.has(`${fromId}->${toId}`)) times.push(t);
   }
   return times;
 }
 
+/**
+ * Find intervals [tStart, tEnd] where BOTH activities are simultaneously
+ * inside G. The two timelines may have different lengths; we iterate over
+ * the full length of both (treating out-of-bounds as false) to avoid
+ * silently truncating the overlap search.
+ */
 function overlapIntervals(inA, inB) {
-  const n = Math.min(inA.length, inB.length);
+  const n = Math.max(inA.length, inB.length);
   const intervals = [];
   let start = null;
 
   for (let t = 0; t < n; t++) {
-    const both = !!inA[t] && !!inB[t];
+    const both = !!(inA[t] ?? false) && !!(inB[t] ?? false);
     if (both && start == null) start = t;
     if (!both && start != null) {
       intervals.push([start, t - 1]);
@@ -455,17 +547,6 @@ function overlapIntervals(inA, inB) {
 function firstExitAtOrAfter(exitTimesList, tStart) {
   for (const t of exitTimesList) if (t >= tStart) return t;
   return null;
-}
-
-function markOverlapInternalEdgesAsViolating(orderedEdges, internalKeys, tStart, tEnd, violatingArcKeys) {
-  for (let t = tStart; t <= tEnd; t++) {
-    const e = orderedEdges[t];
-    if (!e) continue;
-    const fromId = e.from?.id ?? e.from;
-    const toId = e.to?.id ?? e.to;
-    const k = `${fromId}->${toId}`;
-    if (internalKeys.has(k)) violatingArcKeys.add(k);
-  }
 }
 
 /* ====================================================================== */

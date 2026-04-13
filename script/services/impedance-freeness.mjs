@@ -103,7 +103,6 @@ export function verifyImpedanceFreeness(simpleModel, source, sink) {
     source,
     sink,
   );
-  console.log("Extracted CAS:", casSet);
 
   const normalizedMAS = normalizeCASLValues(casSet, rdltGraph, R2Graph);
 
@@ -150,7 +149,6 @@ export function verifyImpedanceFreeness(simpleModel, source, sink) {
   // Build transformedArcMap once
   const transformedArcMap = transformArcMapLocal(arcMap);
 
-  // --- Existing "Main Model" instance stays ---
   const mainInstance = {
     name: "Main Model",
     evaluation: {
@@ -161,7 +159,6 @@ export function verifyImpedanceFreeness(simpleModel, source, sink) {
       },
       criteria,
       violating: { arcs: violatingArcUIDs, vertices: [] },
-      // (optional) you can keep your details block, but the default UI panels won't render it
     },
   };
 
@@ -179,9 +176,7 @@ export function verifyImpedanceFreeness(simpleModel, source, sink) {
 }
 
 function checkImpedanceFreeness(casSet) {
-  // Count how many CAS use each arc
   const arcUsageMap = new Map();
-  // "from.id->to.id" → { fromId, toId, L, casIndices[] }
 
   for (let i = 0; i < casSet.length; i++) {
     for (const edge of casSet[i].edges) {
@@ -794,7 +789,7 @@ function buildCASInstances(casSet, { vertexMap, arcMap, transformedArcMap }) {
       const L = e.maxTraversals ?? e.L ?? e.l ?? 1;
       return {
         pass: true,
-        description: `Arc ${fromId}→${toId} (L=${L})`,
+        description: `${fromId}→${toId} (L=${L})`,
       };
     });
 
