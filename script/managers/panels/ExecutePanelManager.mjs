@@ -2,6 +2,7 @@ import Activity from "../../entities/activity/Activity.mjs";
 import { buildElement, Form } from "../../utils.mjs";
 import { ActivitiesManager } from "../activity/ActivitiesManager.mjs";
 import ModelContext from "../model/ModelContext.mjs";
+import { PAESimulationManager } from "../activity/extraction/PAESimulationManager.mjs";
 
 export default class ExecutePanelManager {
     /** @type { ModelContext } */
@@ -22,11 +23,12 @@ export default class ExecutePanelManager {
      *      root: HTMLDivElement,
      *      generateButton: HTMLButtonElement,
      *      simulateButton: HTMLButtonElement,
+     *      paeButton: HTMLButtonElement,
      *  },
      *  vertexSimplification: {
      *      root: HTMLDivElement,
-    *       generateLevel1Button: HTMLButtonElement,
-    *       generateLevel2Button: HTMLButtonElement,
+     *      generateLevel1Button: HTMLButtonElement,
+     *      generateLevel2Button: HTMLButtonElement,
      *  },
      *  convert: {
      *      root: HTMLDivElement,
@@ -90,6 +92,7 @@ export default class ExecutePanelManager {
         aeSectionViews.root = aeSectionRoot;
         aeSectionViews.generateButton = aeSectionRoot.querySelector("button[data-subaction='generate']");
         aeSectionViews.simulateButton = aeSectionRoot.querySelector("button[data-subaction='simulate']");
+        aeSectionViews.paeButton = aeSectionRoot.querySelector("button[data-subaction='pae']");
 
         aeSectionViews.generateButton.addEventListener("click", async () => {
             const { name, source, sink, isTargeted, isMaximal } = this.#forms.activityExtraction.getValues();
@@ -126,6 +129,38 @@ export default class ExecutePanelManager {
                 name, source: Number(source), sink: Number(sink), mode,
                 targetedArcs
             }, visualModel);
+        });
+
+        aeSectionViews.paeButton.addEventListener("click", async () => {
+            const { name, source, sink } = this.#forms.activityExtraction.getValues();
+            if(!source || !sink) return;
+
+            const visualModel = this.context.managers.visualModel.makeCopy();
+
+            const paeManager = new PAESimulationManager(
+                this.context,
+                { name: name?.trim() || "<Untitled PAE>", source: Number(source), sink: Number(sink) },
+                visualModel
+            );
+
+            // Once the algorithm finishes, save any found parallel activities
+            // and report the result back to the user via the conclusion
+            await paeManager.ready;
+
+            const conclusion = paeManager.getConclusion();
+            if(paeManager.isDeadlock) {
+                // Nothing to save — inform the user
+                alert(`PAE Result: ${conclusion.title}\n\n${conclusion.description}`);
+                return;
+            }
+
+            // Save all parallel groups found
+            for(let g = 0; g < paeManager.groupCount; g++) {
+                const groupLabel = paeManager.groupCount > 1
+                    ? `${name?.trim() || "PAE"} (Group ${g + 1})`
+                    : name?.trim() || "<Untitled PAE>";
+                paeManager.saveParallelActivities(groupLabel, g);
+            }
         });
     }
 
@@ -199,7 +234,7 @@ export default class ExecutePanelManager {
                     buildElement("div", { classname: "activity-origin" }, [
                         buildElement("span", { classname: "data-passed-message" }, [ passed ? "Passed" : "Failed" ]),
                         " • ",
-                        { aes: "Simulated", direct: "Direct Input", ae: "Generated", import: "From File" }[activity.origin] || ""
+                        { aes: "Simulated", direct: "Direct Input", ae: "Generated", import: "From File", pae: "Parallel Extracted" }[activity.origin] || ""
                     ]),
                 ]),
                 buildElement("td", {}, [ simulateButton, downloadButton, deleteButton ])

@@ -206,13 +206,13 @@ function checkImpedanceFreeness(casSet) {
       criteria.push({
         pass: false,
         description:
-          `Arc ${fromId}→${toId} (L=${L}) is shared by ${usageCount} Activities: ` +
+          `Arc ${fromId}→${toId} (L=${L}) is shared by ${usageCount} Activities: [` +
           `${casIndices.join(", ")}] — composite activity blocked (impedance)`,
       });
     } else {
       criteria.push({
         pass: true,
-        description: `Arc ${fromId}→${toId} (L=${L}), used by ${usageCount} Activities — no impedance`,
+        description: `${fromId}→${toId} — no impedance`,
       });
     }
   }
@@ -756,7 +756,7 @@ function buildSharedArcInstance(sharedArcs, sharedArcUIDs) {
     const arcUID = sharedArcUIDs[i];
     const meta = sharedArcs[i];
     if (!meta) continue;
-    remarks[arcUID] = `Used by Activities ${meta.usedBy.join(", ")} (L=${meta.L})`;
+    remarks[arcUID] = `Used by Activities ${meta.usedBy.join(", ")}`;
   }
 
   return {
