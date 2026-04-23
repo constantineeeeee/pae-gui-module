@@ -341,11 +341,11 @@ export class PAESimulationManager {
 
         const entries = [];
         result.parallelActivitySets.forEach((actSet, groupIndex) => {
-            for (const [processIdStr, activityProfile] of Object.entries(actSet)) {
+            for (const entry of actSet) {
                 entries.push({
-                    processId:      Number(processIdStr),
+                    processId:      entry.processId,
                     groupIndex,
-                    activityProfile,
+                    activityProfile: entry.activityProfile,
                 });
             }
         });

@@ -4,11 +4,9 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Layout Constants
 const LEFT_PAD = 80;
-const TOP_PAD = 60;
-
-// D3 layout spacing (similar to your old X_GAP/Y_GAP)
-const X_GAP = 320; // horizontal spacing
-const Y_GAP = 150; // vertical spacing
+const TOP_PAD = 80;
+const X_GAP = 280; // horizontal spacing between depth levels
+const Y_GAP = 120; // vertical spacing between sibling nodes
 
 export default class TraversalTreeViewerManager {
   context;
@@ -92,12 +90,10 @@ export default class TraversalTreeViewerManager {
     img.src = url;
   }
 
-  // ✅ FIXED: correct manager + method name
   #runAndRender() {
     const snapshot =
       this.#snapshot ?? this.context.managers.visualModel.makeCopy();
 
-    // Your project uses traversalTree.run(snapshot)
     const res = this.context.managers.traversalTree.run(snapshot);
 
     if (!res || res === 0) {
@@ -125,43 +121,185 @@ export default class TraversalTreeViewerManager {
     this.#svg.appendChild(t);
   }
 
+  // ─── Helpers ────────────────────────────────────────────────────────────────
+
+  /** Format S array as "S([0, a, (ε, m), ε])" */
+  #sToString(S) {
+    if (!S || S.length === 0) return "S([])";
+    const parts = (S ?? []).map((entry) => {
+      if (Array.isArray(entry)) return `(${entry.join(", ")})`;
+      return String(entry);
+    });
+    return `S([${parts.join(", ")}])`;
+  }
+
+  /** True if the node is a join placeholder — rendered as "(v)" */
+  #isPlaceholder(node) {
+    return !!(node.placeholder || node.isPlaceholder || node.isJoinProxy);
+  }
+
+  // ─── Node drawing ────────────────────────────────────────────────────────────
+
+  /**
+   * Draw a labeled node:  vName (underlined, bold)
+   *                        S([...])  (smaller, below)
+   *
+   * Returns bounding info: { x, y, w, h, xIn, xOut, yMid }
+   */
+  #drawLabeledNode(g, x, y, v, S) {
+    const nodeG = document.createElementNS(SVG_NS, "g");
+    nodeG.setAttribute("transform", `translate(${x},${y})`);
+
+    // Vertex name — bold + underline
+    const nameText = document.createElementNS(SVG_NS, "text");
+    nameText.setAttribute("font-size", "13");
+    nameText.setAttribute("font-weight", "bold");
+    nameText.setAttribute("text-decoration", "underline");
+    nameText.setAttribute("fill", "currentColor");
+    nameText.setAttribute("x", "0");
+    nameText.setAttribute("y", "0");
+    nameText.textContent = v;
+    nodeG.appendChild(nameText);
+
+    // S([...]) subscript — smaller text below
+    const sText = document.createElementNS(SVG_NS, "text");
+    sText.setAttribute("font-size", "10");
+    sText.setAttribute("fill", "currentColor");
+    sText.setAttribute("opacity", "0.9");
+    sText.setAttribute("x", "0");
+    sText.setAttribute("y", "14");
+    sText.textContent = this.#sToString(S);
+    nodeG.appendChild(sText);
+
+    g.appendChild(nodeG);
+
+    // Measure via getBBox (after append)
+    let bb;
+    try {
+      bb = nodeG.getBBox();
+    } catch (_) {
+      bb = { width: 80, height: 24 };
+    }
+
+    const w = Math.max(bb.width, 1);
+    const h = Math.max(bb.height, 24);
+
+    return {
+      x,
+      y,
+      w,
+      h,
+      xIn: x,
+      xOut: x + w,
+      yMid: y + h / 2,
+    };
+  }
+
+  /**
+   * Draw a placeholder (join/proxy) node: "(v)"
+   *
+   * Returns bounding info: { x, y, w, h, xIn, xOut, yMid }
+   */
+  #drawPlaceholderNode(g, x, y, v) {
+    const nodeG = document.createElementNS(SVG_NS, "g");
+    nodeG.setAttribute("transform", `translate(${x},${y})`);
+
+    const text = document.createElementNS(SVG_NS, "text");
+    text.setAttribute("font-size", "13");
+    text.setAttribute("fill", "currentColor");
+    text.setAttribute("x", "0");
+    text.setAttribute("y", "0");
+    text.textContent = `(${v})`;
+    nodeG.appendChild(text);
+
+    g.appendChild(nodeG);
+
+    let bb;
+    try {
+      bb = nodeG.getBBox();
+    } catch (_) {
+      bb = { width: 40, height: 16 };
+    }
+
+    const w = Math.max(bb.width, 1);
+    const h = Math.max(bb.height, 16);
+
+    return {
+      x,
+      y,
+      w,
+      h,
+      xIn: x,
+      xOut: x + w,
+      yMid: y + h / 2,
+    };
+  }
+
+  // ─── Edge drawing ────────────────────────────────────────────────────────────
+
+  #drawEdge(edgeG, x1, y1, x2, y2, label) {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", String(x1));
+    line.setAttribute("y1", String(y1));
+    line.setAttribute("x2", String(x2));
+    line.setAttribute("y2", String(y2));
+    line.setAttribute("stroke", "currentColor");
+    line.setAttribute("stroke-width", "1.8");
+    line.setAttribute("opacity", "0.85");
+    line.setAttribute("marker-end", "url(#tt-arrow)");
+    edgeG.appendChild(line);
+
+    if (label !== undefined && label !== null) {
+      const mx = (x1 + x2) / 2;
+      const my = (y1 + y2) / 2;
+      const text = document.createElementNS(SVG_NS, "text");
+      text.setAttribute("x", String(mx));
+      text.setAttribute("y", String(my - 6));
+      text.setAttribute("font-size", "11");
+      text.setAttribute("font-weight", "700");
+      text.setAttribute("fill", "#d11");
+      text.setAttribute("text-anchor", "middle");
+      // Use "i=" prefix matching the paper's notation
+      text.textContent = `i=${label}`;
+      edgeG.appendChild(text);
+    }
+  }
+
+  // ─── Main render ─────────────────────────────────────────────────────────────
+
   #renderTree(res) {
     const d3 = window.d3;
     if (!d3) {
       this.#drawMessage(
-        'D3 not found. Add: <script src="https://cdn.jsdelivr.net/npm/d3@7"></script> in main.html',
+        'D3 not found. Add <script src="https://cdn.jsdelivr.net/npm/d3@7"></script> to main.html',
       );
       return;
     }
 
     const make = (tag) => document.createElementNS(SVG_NS, tag);
-    const sToString = (S) => `S([${(S ?? []).join(",")}])`;
 
-    // ---- defs: arrowhead marker ----
+    // ── arrowhead marker ──────────────────────────────────────────────────────
     const defs = make("defs");
     const marker = make("marker");
     marker.setAttribute("id", "tt-arrow");
     marker.setAttribute("viewBox", "0 0 10 10");
     marker.setAttribute("refX", "9");
     marker.setAttribute("refY", "5");
-    marker.setAttribute("markerWidth", "7");
-    marker.setAttribute("markerHeight", "7");
+    marker.setAttribute("markerWidth", "6");
+    marker.setAttribute("markerHeight", "6");
     marker.setAttribute("orient", "auto-start-reverse");
-
     const tip = make("path");
     tip.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
     tip.setAttribute("fill", "currentColor");
-
     marker.appendChild(tip);
     defs.appendChild(marker);
     this.#svg.appendChild(defs);
 
-    // ============================================================
-    // 1) Build spanning-tree backbone (single parent per node)
-    // ============================================================
+    // ── Build spanning tree backbone (single parent per node) ─────────────────
     const childrenOf = new Map();
     res.allNodes.forEach((n) => childrenOf.set(n.id, []));
 
+    // Process nodes from latest time to earliest so we assign parents greedily
     const sortedNodes = [...res.allNodes].sort(
       (a, b) => (b.time ?? 0) - (a.time ?? 0),
     );
@@ -171,7 +309,7 @@ export default class TraversalTreeViewerManager {
       for (const c of n.children ?? []) {
         if (!parentOf.has(c.id)) {
           parentOf.set(c.id, n.id);
-          childrenOf.get(n.id).push(c);
+          childrenOf.get(n.id)?.push(c);
         }
       }
     }
@@ -188,7 +326,6 @@ export default class TraversalTreeViewerManager {
       };
     }
 
-    // if multiple roots, add a super root
     const superRoot = {
       id: "__root__",
       ref: null,
@@ -197,26 +334,19 @@ export default class TraversalTreeViewerManager {
 
     const rootH = d3.hierarchy(superRoot);
 
-    // ============================================================
-    // 2) D3 layout
-    // nodeSize: [vertical, horizontal]
-    // We'll map d.y -> x (horizontal), d.x -> y (vertical)
-    // ============================================================
+    // ── D3 tree layout ────────────────────────────────────────────────────────
+    // nodeSize: [vertical spacing, horizontal spacing]
+    // We map d.y -> x (horizontal), d.x -> y (vertical)
     const treeLayout = d3.tree().nodeSize([Y_GAP, X_GAP]);
     treeLayout(rootH);
 
     const nodes = rootH.descendants().filter((d) => d.data.ref);
 
-    // find vertical bounds
     const minX = Math.min(...nodes.map((d) => d.x));
-    const maxX = Math.max(...nodes.map((d) => d.x));
+    const verticalShift = TOP_PAD - minX + 40;
 
-    // shift everything downward so nothing is clipped
-    const verticalShift = TOP_PAD - minX + 40; // 40 = breathing space
-
+    // Seed layout positions from D3
     const layoutPos = new Map();
-
-    // 1) FIRST: seed layoutPos from D3 positions
     nodes.forEach((d) => {
       layoutPos.set(d.data.id, {
         x: LEFT_PAD + d.y,
@@ -224,31 +354,23 @@ export default class TraversalTreeViewerManager {
       });
     });
 
-    // --- Join type helper ---
-    const joinTypeOf = (node) => {
-      // Prefer per-node join type if present
-      const direct = node.joinType ?? node.joinTypes ?? null;
-      if (direct) return direct;
-
-      // Or res.joinTypes may be a Map keyed by vertex name (node.v)
-      // Your console shows: Map(2) { 'x2' => 'OR', 'y7' => 'AND' }
-      return res.joinTypes?.get?.(node.v) ?? null;
-    };
-
-    // --- shift a node + its backbone subtree (childrenOf) by dy in the layoutPos map ---
+    // Center AND-join nodes between their incoming parents
     const shiftSubtreeY = (nodeId, dy) => {
       const stack = [nodeId];
       while (stack.length) {
         const curId = stack.pop();
         const p = layoutPos.get(curId);
         if (p) layoutPos.set(curId, { x: p.x, y: p.y + dy });
-
-        const kids = childrenOf.get(curId) ?? [];
-        for (const k of kids) stack.push(k.id);
+        for (const k of childrenOf.get(curId) ?? []) stack.push(k.id);
       }
     };
 
-    // 2) THEN: center AND-joins between their incoming parents
+    const joinTypeOf = (node) => {
+      const direct = node.joinType ?? node.joinTypes ?? null;
+      if (direct) return direct;
+      return res.joinTypes?.get?.(node.v) ?? null;
+    };
+
     for (const n of res.allNodes) {
       const jt = joinTypeOf(n);
       if (jt !== "AND") continue;
@@ -266,103 +388,34 @@ export default class TraversalTreeViewerManager {
       const targetY = parentYs.reduce((a, b) => a + b, 0) / parentYs.length;
       const dy = targetY - myPos.y;
       if (Math.abs(dy) < 1) continue;
-
-      // Move AND node AND its subtree so outgoing path remains aligned
       shiftSubtreeY(n.id, dy);
     }
 
-    // ============================================================
-    // 3) SVG Layers
-    // ============================================================
+    // ── SVG layers ────────────────────────────────────────────────────────────
     const edgeGroup = make("g");
-    const syncGroup = make("g");
     const nodeGroup = make("g");
     this.#svg.appendChild(edgeGroup);
-    this.#svg.appendChild(syncGroup);
     this.#svg.appendChild(nodeGroup);
 
-    // ============================================================
-    // 4) Helpers
-    // ============================================================
-    const drawStraightEdge = (x1, y1, x2, y2, timeLabel, opacity = "0.9") => {
-      const line = make("line");
-      line.setAttribute("x1", String(x1));
-      line.setAttribute("y1", String(y1));
-      line.setAttribute("x2", String(x2));
-      line.setAttribute("y2", String(y2));
-
-      line.setAttribute("stroke", "currentColor");
-      line.setAttribute("stroke-width", "2.2");
-      line.setAttribute("opacity", opacity);
-      line.setAttribute("fill", "none");
-      line.setAttribute("marker-end", "url(#tt-arrow)");
-
-      edgeGroup.appendChild(line);
-
-      // time label near the middle (slightly above the line)
-      if (timeLabel !== undefined) {
-        const text = make("text");
-        const mx = (x1 + x2) / 2;
-        const my = (y1 + y2) / 2;
-
-        text.setAttribute("x", String(mx));
-        text.setAttribute("y", String(my - 10));
-        text.setAttribute("font-size", "12");
-        text.setAttribute("font-weight", "700");
-        text.setAttribute("fill", "#d11");
-        text.setAttribute("text-anchor", "middle");
-        text.textContent = `t=${timeLabel}`;
-
-        edgeGroup.appendChild(text);
-      }
-    };
-
-    const drawTextNode = (x, y, v, S) => {
-      const g = make("g");
-      g.setAttribute("transform", `translate(${x},${y})`);
-
-      const title = make("text");
-      title.setAttribute("font-size", "14");
-      title.setAttribute("font-weight", "600");
-      title.setAttribute("fill", "currentColor");
-      title.textContent = v; // x4
-      g.appendChild(title);
-
-      const sub = make("text");
-      sub.setAttribute("y", "18");
-      sub.setAttribute("font-size", "12");
-      sub.setAttribute("opacity", "0.85");
-      sub.setAttribute("fill", "currentColor");
-      sub.textContent = sToString(S); // S([0,...])
-      g.appendChild(sub);
-
-      nodeGroup.appendChild(g);
-      const bb = g.getBBox();
-      return {
-        w: bb.width,
-        h: bb.height,
-        xIn: x,
-        xOut: x + bb.width,
-        yMid: y + bb.height / 2,
-      };
-    };
-
-    // ============================================================
-    // 5) Render nodes & capture bounds
-    // ============================================================
+    // ── Render nodes ──────────────────────────────────────────────────────────
+    // finalPos stores rendered bounds for each node id
     const finalPos = new Map();
 
     for (const n of res.allNodes) {
       const p = layoutPos.get(n.id);
       if (!p) continue;
-      const dims = drawTextNode(p.x, p.y, n.v, n.S);
-      finalPos.set(n.id, { id: n.id, v: n.v, x: p.x, y: p.y, ...dims });
+
+      let dims;
+      if (this.#isPlaceholder(n)) {
+        dims = this.#drawPlaceholderNode(nodeGroup, p.x, p.y, n.v);
+      } else {
+        dims = this.#drawLabeledNode(nodeGroup, p.x, p.y, n.v, n.S);
+      }
+
+      finalPos.set(n.id, { id: n.id, v: n.v, ...dims });
     }
 
-    // ============================================================
-    // 6) Render edges: draw ALL parents -> child
-    // This makes AND-joins merge (multiple incoming curves converge).
-    // ============================================================
+    // ── Render edges: ALL parent → child connections ──────────────────────────
     for (const n of res.allNodes) {
       const to = finalPos.get(n.id);
       if (!to) continue;
@@ -371,32 +424,39 @@ export default class TraversalTreeViewerManager {
         const from = finalPos.get(p.id);
         if (!from) continue;
 
-        // draw a curve from parent right-edge -> child left-edge
-        // drawBezierEdge(from.xOut, from.yMid, to.xIn, to.yMid, n.time);
-        drawStraightEdge(from.xOut, from.yMid, to.xIn, to.yMid, n.time);
+        // Only label the edge with i= on non-placeholder targets
+        // (placeholder nodes are intermediaries; the label goes on the
+        //  final labeled node after the placeholder)
+        const label = this.#isPlaceholder(n) ? null : n.time;
+
+        this.#drawEdge(
+          edgeGroup,
+          from.xOut + 4,
+          from.yMid,
+          to.xIn - 2,
+          to.yMid,
+          label,
+        );
       }
     }
 
-    // ============================================================
-    // 7) Resize SVG
-    // ============================================================
-    let screenMaxX = 0;
-    let maxY = 0;
+    // ── Resize SVG ────────────────────────────────────────────────────────────
+    let maxRight = 0;
+    let maxBottom = 0;
 
-    for (const bounds of finalPos.values()) {
-      const rightEdge = bounds.xOut + 150;
-      const bottomEdge = bounds.yMid + 150;
-
-      if (rightEdge > screenMaxX) screenMaxX = rightEdge;
-      if (bottomEdge > maxY) maxY = bottomEdge;
+    for (const b of finalPos.values()) {
+      if (b.xOut + 120 > maxRight) maxRight = b.xOut + 120;
+      if (b.yMid + 80 > maxBottom) maxBottom = b.yMid + 80;
     }
 
     const clientWidth = this.#root.clientWidth || 800;
     const clientHeight = this.#root.clientHeight || 600;
 
-    this.#svg.style.width = `${Math.max(screenMaxX, clientWidth)}px`;
-    this.#svg.style.height = `${Math.max(maxY, clientHeight)}px`;
+    this.#svg.style.width = `${Math.max(maxRight, clientWidth)}px`;
+    this.#svg.style.height = `${Math.max(maxBottom, clientHeight)}px`;
   }
+
+  // ─── Sidebar / metadata panel ─────────────────────────────────────────────
 
   #renderResults(res) {
     const parallelHost = this.#root.querySelector("[data-tt-parallel]");
@@ -404,30 +464,28 @@ export default class TraversalTreeViewerManager {
 
     parallelHost.innerHTML = "";
 
-    const fmtS = (S) => `S([${(S ?? []).join(",")}])`;
+    const fmtS = (S) => {
+      if (!S || S.length === 0) return "S([])";
+      const parts = (S ?? []).map((entry) =>
+        Array.isArray(entry) ? `(${entry.join(", ")})` : String(entry),
+      );
+      return `S([${parts.join(", ")}])`;
+    };
 
-    const renderGroup = (host, branches) => {
+    if (res.maximalPaths && res.maximalPaths.length > 0) {
       const list = document.createElement("div");
-      list.className = "tt-branch-list";
-      list.style.display = "flex";
-      list.style.flexDirection = "column";
-      list.style.gap = "8px";
+      list.style.cssText =
+        "display:flex;flex-direction:column;gap:6px;font-size:12px;";
 
-      for (const b of branches) {
+      for (const b of res.maximalPaths) {
         const row = document.createElement("div");
-        row.className = "tt-branch-row";
-        row.style.fontSize = "13px";
-        row.style.paddingBottom = "4px";
-        row.style.borderBottom = "1px solid rgba(255,255,255,0.1)";
+        row.style.cssText =
+          "padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.1);";
         row.textContent = `${b.v}  —  ${fmtS(b.S)}`;
         list.appendChild(row);
       }
 
-      host.appendChild(list);
-    };
-
-    if (res.maximalPaths && res.maximalPaths.length > 0) {
-      renderGroup(parallelHost, res.maximalPaths);
+      parallelHost.appendChild(list);
     } else {
       parallelHost.textContent = "No parallel branches calculated.";
     }

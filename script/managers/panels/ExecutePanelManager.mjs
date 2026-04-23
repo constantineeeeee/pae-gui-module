@@ -23,7 +23,7 @@ export default class ExecutePanelManager {
      *      root: HTMLDivElement,
      *      generateButton: HTMLButtonElement,
      *      simulateButton: HTMLButtonElement,
-     *      paeButton: HTMLButtonElement,
+     *      isParallelCheckbox: HTMLInputElement,
      *  },
      *  vertexSimplification: {
      *      root: HTMLDivElement,
@@ -92,26 +92,79 @@ export default class ExecutePanelManager {
         aeSectionViews.root = aeSectionRoot;
         aeSectionViews.generateButton = aeSectionRoot.querySelector("button[data-subaction='generate']");
         aeSectionViews.simulateButton = aeSectionRoot.querySelector("button[data-subaction='simulate']");
-        aeSectionViews.paeButton = aeSectionRoot.querySelector("button[data-subaction='pae']");
+        aeSectionViews.isParallelCheckbox = aeSectionRoot.querySelector("[name='isParallel']");
+
+
+        aeSectionViews.isParallelCheckbox.addEventListener("change", () => {
+            const isParallel = aeSectionViews.isParallelCheckbox.checked;
+            aeSectionViews.simulateButton.disabled = isParallel;
+        });
+
+        // aeSectionViews.generateButton.addEventListener("click", async () => {
+        //     const { name, source, sink, isTargeted, isMaximal, isParallel } = this.#forms.activityExtraction.getValues();
+        //     if(!source || !sink) return;
+
+        //     let targetedArcs = new Set();
+        //     const visualModel = this.context.managers.visualModel.makeCopy();
+            
+        //     if(isTargeted) {
+        //         targetedArcs = await this.context.managers.workspace.startTargetedArcSelection(visualModel);
+        //     }
+
+        //     this.context.managers.activities.generateActivity({ 
+        //         name: name?.trim() || "<Untitled Activity>", 
+        //         source: Number(source), 
+        //         sink: Number(sink),
+        //         targetedArcs,
+        //         isMaximal,
+        //         isParallel
+        //     }, visualModel);
+        // });
 
         aeSectionViews.generateButton.addEventListener("click", async () => {
-            const { name, source, sink, isTargeted, isMaximal } = this.#forms.activityExtraction.getValues();
+            const { name, source, sink, mode, isTargeted, isMaximal, isParallel } = this.#forms.activityExtraction.getValues();
             if(!source || !sink) return;
 
-            let targetedArcs = new Set();
             const visualModel = this.context.managers.visualModel.makeCopy();
-            
-            if(isTargeted) {
-                targetedArcs = await this.context.managers.workspace.startTargetedArcSelection(visualModel);
-            }
 
-            this.context.managers.activities.generateActivity({ 
-                name: name?.trim() || "<Untitled Activity>", 
-                source: Number(source), 
-                sink: Number(sink),
-                targetedArcs,
-                isMaximal
-            }, visualModel);
+            if(isParallel) {
+                // PAE path — no targeted arcs, no maximal, no simulate
+                const paeManager = new PAESimulationManager(
+                    this.context,
+                    { name: name?.trim() || "<Untitled PAE>", source: Number(source), sink: Number(sink) },
+                    visualModel
+                );
+
+                await paeManager.ready;
+
+                const conclusion = paeManager.getConclusion();
+                if(paeManager.isDeadlock) {
+                    alert(`PAE Result: ${conclusion.title}\n\n${conclusion.description}`);
+                    return;
+                }
+
+                for(let g = 0; g < paeManager.groupCount; g++) {
+                    const groupLabel = paeManager.groupCount > 1
+                        ? `${name?.trim() || "PAE"} (Group ${g + 1})`
+                        : name?.trim() || "<Untitled PAE>";
+                    paeManager.saveParallelActivities(groupLabel, g);
+                }
+
+            } else {
+                // Normal AE path — unchanged from before
+                let targetedArcs = new Set();
+                if(isTargeted) {
+                    targetedArcs = await this.context.managers.workspace.startTargetedArcSelection(visualModel);
+                }
+
+                this.context.managers.activities.generateActivity({ 
+                    name: name?.trim() || "<Untitled Activity>", 
+                    source: Number(source), 
+                    sink: Number(sink),
+                    targetedArcs,
+                    isMaximal
+                }, visualModel);
+            }
         });
 
         aeSectionViews.simulateButton.addEventListener("click", async () => {
@@ -129,38 +182,6 @@ export default class ExecutePanelManager {
                 name, source: Number(source), sink: Number(sink), mode,
                 targetedArcs
             }, visualModel);
-        });
-
-        aeSectionViews.paeButton.addEventListener("click", async () => {
-            const { name, source, sink } = this.#forms.activityExtraction.getValues();
-            if(!source || !sink) return;
-
-            const visualModel = this.context.managers.visualModel.makeCopy();
-
-            const paeManager = new PAESimulationManager(
-                this.context,
-                { name: name?.trim() || "<Untitled PAE>", source: Number(source), sink: Number(sink) },
-                visualModel
-            );
-
-            // Once the algorithm finishes, save any found parallel activities
-            // and report the result back to the user via the conclusion
-            await paeManager.ready;
-
-            const conclusion = paeManager.getConclusion();
-            if(paeManager.isDeadlock) {
-                // Nothing to save — inform the user
-                alert(`PAE Result: ${conclusion.title}\n\n${conclusion.description}`);
-                return;
-            }
-
-            // Save all parallel groups found
-            for(let g = 0; g < paeManager.groupCount; g++) {
-                const groupLabel = paeManager.groupCount > 1
-                    ? `${name?.trim() || "PAE"} (Group ${g + 1})`
-                    : name?.trim() || "<Untitled PAE>";
-                paeManager.saveParallelActivities(groupLabel, g);
-            }
         });
     }
 
@@ -199,11 +220,15 @@ export default class ExecutePanelManager {
     #initializeForms() {
         // Activity Extraction
         this.#forms.activityExtraction = new Form(this.#views.activityExtraction.root)
-            .setFieldNames([ 'name', 'source', 'sink', 'mode', 'isTargeted', 'isMaximal' ]);
+            .setFieldNames([ 'name', 'source', 'sink', 'mode', 'isTargeted', 'isMaximal', 'isParallel' ]);
         this.#forms.activityExtraction.getFieldElement('mode').addEventListener("change", (event) => 
             this.#views.activityExtraction.root.setAttribute("data-value-mode", event.target.value));
         this.#forms.activityExtraction.getFieldElement('isMaximal').addEventListener("change", (event) => 
             this.#views.activityExtraction.root.setAttribute("data-value-ismaximal", event.target.checked));
+        this.#forms.activityExtraction.getFieldElement('isParallel').addEventListener("change", (event) => {
+            this.#views.activityExtraction.root.setAttribute("data-value-isparallel", event.target.checked);
+            this.#views.activityExtraction.simulateButton.disabled = event.target.checked;
+        });
  
         this.#forms.vertexSimplification = new Form(this.#views.vertexSimplification.root)
             .setFieldNames([ 'rbs' ]);
