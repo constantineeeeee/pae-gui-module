@@ -46,6 +46,9 @@ export default class Activity {
     /** @type {TimelinessOfResponse} */
     tor;
 
+    /** @type {string | null} */
+    parallelGroupId;
+
     /**
      * @param {{ 
      *     id: string, 
@@ -55,7 +58,8 @@ export default class Activity {
      *     sink: VertexUID, 
      *     conclusion: ActivityConclusion, 
      *     profile: ActivityProfile,
-     *     tor: TimelinessOfResponse
+     *     tor: TimelinessOfResponse,
+     *     parallelGroupId: string | null
      * }} values 
      */
     constructor(values) {
@@ -67,5 +71,6 @@ export default class Activity {
         this.conclusion = values.conclusion;
         this.profile = values.profile;
         this.tor = values.tor;
+        this.parallelGroupId = values.parallelGroupId || null;
     }
 }

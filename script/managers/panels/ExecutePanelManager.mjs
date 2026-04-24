@@ -100,27 +100,6 @@ export default class ExecutePanelManager {
             aeSectionViews.simulateButton.disabled = isParallel;
         });
 
-        // aeSectionViews.generateButton.addEventListener("click", async () => {
-        //     const { name, source, sink, isTargeted, isMaximal, isParallel } = this.#forms.activityExtraction.getValues();
-        //     if(!source || !sink) return;
-
-        //     let targetedArcs = new Set();
-        //     const visualModel = this.context.managers.visualModel.makeCopy();
-            
-        //     if(isTargeted) {
-        //         targetedArcs = await this.context.managers.workspace.startTargetedArcSelection(visualModel);
-        //     }
-
-        //     this.context.managers.activities.generateActivity({ 
-        //         name: name?.trim() || "<Untitled Activity>", 
-        //         source: Number(source), 
-        //         sink: Number(sink),
-        //         targetedArcs,
-        //         isMaximal,
-        //         isParallel
-        //     }, visualModel);
-        // });
-
         aeSectionViews.generateButton.addEventListener("click", async () => {
             const { name, source, sink, mode, isTargeted, isMaximal, isParallel } = this.#forms.activityExtraction.getValues();
             if(!source || !sink) return;
@@ -235,34 +214,105 @@ export default class ExecutePanelManager {
     }
 
     /** @param {Activity[]} activities */
+    // refreshActivitiesList(activities) {
+    //     const activitiesManager = this.context.managers.activities;
+        
+    //     const tableBody = this.#views.activities.table.querySelector("tbody");
+    //     tableBody.innerHTML = "";
+
+    //     for(const activity of activities) {
+    //         const viewButton = buildElement("button", { classname: "icon" }, [ buildElement("i", { classname: "fas fa-eye" }) ]);
+    //         const simulateButton = buildElement("button", { classname: "icon" }, [ buildElement("i", { classname: "fas fa-play" }) ]);
+    //         const downloadButton = buildElement("button", { classname: "icon" }, [ buildElement("i", { classname: "fas fa-arrow-down" }) ]);
+    //         const deleteButton = buildElement("button", { classname: "icon" }, [ buildElement("i", { classname: "fas fa-close" }) ]);
+            
+    //         simulateButton.addEventListener("click", () => activitiesManager.simulateActivity(activity.id));
+    //         downloadButton.addEventListener("click", () => this.context.managers.export.exportActivityToTextFile(activity));
+    //         deleteButton.addEventListener("click", () => activitiesManager.deleteActivity(activity.id));
+
+    //         const passed = activity.conclusion?.pass || false;
+
+    //         const actRow = buildElement("tr", { "data-passed": passed }, [
+    //             buildElement("td", {}, [
+    //                 buildElement("div", { classname: "activity-name" }, [ activity.name ]),
+    //                 buildElement("div", { classname: "activity-origin" }, [
+    //                     buildElement("span", { classname: "data-passed-message" }, [ passed ? "Passed" : "Failed" ]),
+    //                     " • ",
+    //                     { aes: "Simulated", direct: "Direct Input", ae: "Generated", import: "From File", pae: "Parallel Extracted" }[activity.origin] || ""
+    //                 ]),
+    //             ]),
+    //             buildElement("td", {}, [ simulateButton, downloadButton, deleteButton ])
+    //         ]);
+
+    //         tableBody.appendChild(actRow);
+    //     }
+    // }
+
     refreshActivitiesList(activities) {
         const activitiesManager = this.context.managers.activities;
-        
         const tableBody = this.#views.activities.table.querySelector("tbody");
         tableBody.innerHTML = "";
 
-        for(const activity of activities) {
-            const viewButton = buildElement("button", { classname: "icon" }, [ buildElement("i", { classname: "fas fa-eye" }) ]);
-            const simulateButton = buildElement("button", { classname: "icon" }, [ buildElement("i", { classname: "fas fa-play" }) ]);
-            const downloadButton = buildElement("button", { classname: "icon" }, [ buildElement("i", { classname: "fas fa-arrow-down" }) ]);
-            const deleteButton = buildElement("button", { classname: "icon" }, [ buildElement("i", { classname: "fas fa-close" }) ]);
-            
-            simulateButton.addEventListener("click", () => activitiesManager.simulateActivity(activity.id));
-            downloadButton.addEventListener("click", () => this.context.managers.export.exportActivityToTextFile(activity));
-            deleteButton.addEventListener("click", () => activitiesManager.deleteActivity(activity.id));
+        // Group activities by parallelGroupId — ungrouped ones get their own group
+        const groups = new Map();
+        for (const activity of activities) {
+            const key = activity.parallelGroupId || activity.id;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(activity);
+        }
 
-            const passed = activity.conclusion?.pass || false;
+        for (const [key, group] of groups) {
+            const isParallelGroup = group.length > 1;
+
+            const simulateButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-play" })]);
+            const downloadButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-arrow-down" })]);
+            const deleteButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-close" })]);
+
+            const passed = group[0].conclusion?.pass || false;
+            const origin = { aes: "Simulated", direct: "Direct Input", ae: "Generated", import: "From File", pae: "Parallel Extracted" }[group[0].origin] || "";
+
+            // Label: if parallel group, show shared name without "— Process N"
+            const label = isParallelGroup
+                ? group[0].name.replace(/\s*—\s*Process\s*\d+$/, "")
+                : group[0].name;
+
+            // Sub-labels: show each process name indented
+            const subLabels = isParallelGroup
+                ? group.map(a => buildElement("div", { classname: "activity-process-label" }, [a.name]))
+                : [];
+
+            simulateButton.addEventListener("click", () => {
+                if (isParallelGroup) {
+                    activitiesManager.simulateParallelGroup(group.map(a => a.id));
+                } else {
+                    activitiesManager.simulateActivity(group[0].id);
+                }
+            });
+
+            downloadButton.addEventListener("click", () => {
+                for (const activity of group) {
+                    this.context.managers.export.exportActivityToTextFile(activity);
+                }
+            });
+
+            deleteButton.addEventListener("click", () => {
+                for (const activity of group) {
+                    activitiesManager.deleteActivity(activity.id);
+                }
+            });
 
             const actRow = buildElement("tr", { "data-passed": passed }, [
                 buildElement("td", {}, [
-                    buildElement("div", { classname: "activity-name" }, [ activity.name ]),
+                    buildElement("div", { classname: "activity-name" }, [label]),
                     buildElement("div", { classname: "activity-origin" }, [
-                        buildElement("span", { classname: "data-passed-message" }, [ passed ? "Passed" : "Failed" ]),
+                        buildElement("span", { classname: "data-passed-message" }, [passed ? "Passed" : "Failed"]),
                         " • ",
-                        { aes: "Simulated", direct: "Direct Input", ae: "Generated", import: "From File", pae: "Parallel Extracted" }[activity.origin] || ""
+                        origin,
+                        isParallelGroup ? ` (${group.length} processes)` : ""
                     ]),
+                    ...subLabels
                 ]),
-                buildElement("td", {}, [ simulateButton, downloadButton, deleteButton ])
+                buildElement("td", {}, [simulateButton, downloadButton, deleteButton])
             ]);
 
             tableBody.appendChild(actRow);

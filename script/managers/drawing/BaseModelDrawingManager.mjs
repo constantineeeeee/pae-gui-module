@@ -278,11 +278,43 @@ export class BaseModelDrawingManager {
         this.#highlights.vertices.add(vertexUID);
     }
 
-    highlightArc(arcUID) {
+    // highlightArc(arcUID) {
+    //     const arcBuilder = this.builders.arcs[arcUID];
+    //     if(!arcBuilder) return;
+
+    //     arcBuilder.element.classList.add("active");
+    //     this.#highlights.arcs.add(arcUID);
+    // }
+
+    // clearHighlights() {
+    //     for(const highlightedVertexUID of this.#highlights.vertices) {
+    //         const vertexBuilder = this.builders.vertices[highlightedVertexUID];
+    //         if(!vertexBuilder) continue;
+
+    //         vertexBuilder.element.classList.remove("active");
+    //     } 
+
+    //     for(const highlightedArcUID of this.#highlights.arcs) {
+    //         const arcBuilder = this.builders.arcs[highlightedArcUID];
+    //         if(!arcBuilder) continue;
+
+    //         arcBuilder.element.classList.remove("active");
+    //     }
+
+    //     this.#highlights.vertices.clear();
+    //     this.#highlights.arcs.clear();
+    // }
+    highlightArc(arcUID, color = null) {
         const arcBuilder = this.builders.arcs[arcUID];
         if(!arcBuilder) return;
 
         arcBuilder.element.classList.add("active");
+
+        if(color) {
+            const highlightEl = arcBuilder.element.querySelector(".arc-highlight");
+            if(highlightEl) highlightEl.style.stroke = color;
+        }
+
         this.#highlights.arcs.add(arcUID);
     }
 
@@ -290,15 +322,16 @@ export class BaseModelDrawingManager {
         for(const highlightedVertexUID of this.#highlights.vertices) {
             const vertexBuilder = this.builders.vertices[highlightedVertexUID];
             if(!vertexBuilder) continue;
-
             vertexBuilder.element.classList.remove("active");
-        } 
+        }
 
         for(const highlightedArcUID of this.#highlights.arcs) {
             const arcBuilder = this.builders.arcs[highlightedArcUID];
             if(!arcBuilder) continue;
-
             arcBuilder.element.classList.remove("active");
+            // Also remove inline color so CSS default takes over next time
+            const highlightEl = arcBuilder.element.querySelector(".arc-highlight");
+            if(highlightEl) highlightEl.style.stroke = "";
         }
 
         this.#highlights.vertices.clear();

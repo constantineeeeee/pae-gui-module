@@ -341,6 +341,15 @@ export default class WorkspaceManager {
         );
     }
 
+    /** @param {Activity[]} activities */
+    startParallelActivitySimulation(activities) {
+        return new ActivitySimulationManager(
+            this.context,
+            activities,  // pass the array instead of a single activity
+            this.context.managers.visualModel.makeCopy()
+        );
+    }
+
     showVerificationResults(result, visualModel, activityProfile = null) {
       return new VerificationsResultManager(
         this.context,

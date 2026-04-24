@@ -149,6 +149,16 @@ export class ActivitiesManager {
         this.context.managers.workspace.startActivitySimulation(activity);
     }
 
+    simulateParallelGroup(activityIDs) {
+        const activities = activityIDs
+            .map(id => this.#activities.find(a => a.id === id))
+            .filter(Boolean);
+
+        if (activities.length === 0) return;
+
+        this.context.managers.workspace.startParallelActivitySimulation(activities);
+    }
+
     deleteActivity(activityID) {
         this.#activities = this.#activities.filter(a => a.id !== activityID);
         this.#refreshActivitiesList();

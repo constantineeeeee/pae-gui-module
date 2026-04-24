@@ -9,6 +9,7 @@ import { ASSubworkspaceManager } from "./ASSubworkspaceManager.mjs";
 import { ASDetailsPanelManager } from "./panels/ASDetailsPanelManager.mjs";
 import { ASProfilePanelManager } from "./panels/ASProfilePanelManager.mjs";
 import { ASTORPanelManager } from "./panels/ASTORPanelManager.mjs";
+import { buildElement } from "../../../utils.mjs";
 
 export class ActivitySimulationManager {
     /** @type {ModelContext} */
@@ -21,6 +22,12 @@ export class ActivitySimulationManager {
      * @type {Activity} 
     */
     #activity;
+
+    /** @type {Activity[]} */
+    #activities = [];
+
+    /** @type {boolean} */
+    #isParallel = false;
 
     /** @type {VisualRDLTModel} */
     #modelSnapshot;
@@ -40,6 +47,8 @@ export class ActivitySimulationManager {
      * */
     #panels;
 
+    /** @type {{ rowsByTimestep: { [t: number]: HTMLTableRowElement }, color: string }[]} */
+    #parallelPanels = [];
 
     /** 
      * @type {{
@@ -62,10 +71,16 @@ export class ActivitySimulationManager {
     constructor(context, activity, visualModelSnapshot) {
         this.context = context;
         this.id = generateUniqueID();
-        this.#activity = activity;
         this.#modelSnapshot = visualModelSnapshot;
 
-        this.#states.maxTimestep = Math.max(...Object.keys(this.#activity.profile).map(t => Number(t)));
+        // Support both a single Activity and an array of parallel Activities
+        this.#isParallel = Array.isArray(activity);
+        this.#activities = this.#isParallel ? activity : [activity];
+        this.#activity = this.#activities[0]; // keep for panel compatibility
+
+        // Max timestep is the highest across ALL profiles
+        const allTimesteps = this.#activities.flatMap(a => Object.keys(a.profile).map(Number));
+        this.#states.maxTimestep = allTimesteps.length > 0 ? Math.max(...allTimesteps) : 1;
 
         this.#initialize();
     }
@@ -88,8 +103,81 @@ export class ActivitySimulationManager {
 
         this.#panels.details.displayActivityDetails(this.#activity);
 
-        this.#panels.profile.displayProfileList(this.#activity.profile);
-        this.#panels.tor.displayTOR(this.#activity.tor);
+        // this.#panels.profile.displayProfileList(this.#activity.profile);
+        // this.#panels.tor.displayTOR(this.#activity.tor);
+        // if (this.#isParallel) {
+        //     // Merge all profiles for display in the profile panel
+        //     const mergedProfile = {};
+        //     for (const activity of this.#activities) {
+        //         for (const [t, arcs] of Object.entries(activity.profile)) {
+        //             if (!mergedProfile[t]) mergedProfile[t] = new Set();
+        //             for (const arcUID of arcs) mergedProfile[t].add(arcUID);
+        //         }
+        //     }
+        //     this.#panels.profile.displayProfileList(mergedProfile);
+        // } else {
+        //     this.#panels.profile.displayProfileList(this.#activity.profile);
+        //     this.#panels.tor.displayTOR(this.#activity.tor);
+        // }
+
+        if (this.#isParallel) {
+            const profilePanelMain = rootElement.querySelector(".panel[data-panel-id='profile'] main");
+            profilePanelMain.innerHTML = "";
+
+            const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
+
+            this.#activities.forEach((activity, i) => {
+                const color = colors[i % colors.length];
+
+                // Colored label per process
+                const label = document.createElement("div");
+                label.style.cssText = `font-weight:500;font-size:13px;padding:8px 0 4px 8px;border-left:3px solid ${color};margin-bottom:4px;margin-top:${i > 0 ? "16px" : "0"}`;
+                label.textContent = `Process ${i + 1}`;
+
+                // Table
+                const table = document.createElement("table");
+                table.className = "anchor-right";
+                table.innerHTML = `<thead><tr><th>Timestep</th><th>Traversed Arcs</th></tr></thead><tbody></tbody>`;
+
+                const tbody = table.querySelector("tbody");
+                const rowsByTimestep = {};
+
+                const timesteps = Object.keys(activity.profile).map(Number).sort((a, b) => a - b);
+                for (const t of timesteps) {
+                    const tr = document.createElement("tr");
+                    tr.style.cursor = "pointer";
+                    tr.addEventListener("click", () => this.setCurrentTimestep(t));
+
+                    const tdTime = document.createElement("td");
+                    tdTime.textContent = t;
+
+                    const tdArcs = document.createElement("td");
+                    tdArcs.className = "as-profile-reachables";
+                    for (const arcUID of activity.profile[t]) {
+                        const [from, to] = this.getArcIdentifierPair(arcUID);
+                        const tag = document.createElement("div");
+                        tag.className = "arc-tag";
+                        tag.innerHTML = `<div>${from}</div><div>${to}</div>`;
+                        tdArcs.appendChild(tag);
+                    }
+
+                    tr.appendChild(tdTime);
+                    tr.appendChild(tdArcs);
+                    tbody.appendChild(tr);
+                    rowsByTimestep[t] = tr;
+                }
+
+                profilePanelMain.appendChild(label);
+                profilePanelMain.appendChild(table);
+
+                this.#parallelPanels.push({ rowsByTimestep, color });
+            });
+
+        } else {
+            this.#panels.profile.displayProfileList(this.#activity.profile);
+            this.#panels.tor.displayTOR(this.#activity.tor);
+        }
+
         this.setCurrentTimestep(1);
     }
     
@@ -110,18 +198,48 @@ export class ActivitySimulationManager {
         }
     }
 
+    // setCurrentTimestep(timestep) {
+    //     this.#states.currentTimestep = timestep;
+    //     this.#panels.profile.setActiveTimestep(timestep);
+
+    //     // Update visualization
+    //     this.#drawingManager.clearHighlights();
+        
+        
+    //     // Highlight current arcs
+    //     const traversedArcUIDs = this.#activity.profile[timestep] || new Set();
+    //     for(const arcUID of traversedArcUIDs) {
+    //         this.#drawingManager.highlightArc(arcUID);
+    //     }
+    // }
+
     setCurrentTimestep(timestep) {
         this.#states.currentTimestep = timestep;
         this.#panels.profile.setActiveTimestep(timestep);
 
-        // Update visualization
         this.#drawingManager.clearHighlights();
-        
-        
-        // Highlight current arcs
-        const traversedArcUIDs = this.#activity.profile[timestep] || new Set();
-        for(const arcUID of traversedArcUIDs) {
-            this.#drawingManager.highlightArc(arcUID);
+
+        if (this.#isParallel) {
+            const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
+            this.#activities.forEach((activity, i) => {
+                const color = colors[i % colors.length];
+                const arcs = activity.profile[timestep] ?? new Set();
+                for (const arcUID of arcs) {
+                    this.#drawingManager.highlightArc(arcUID, color);
+                }
+
+                // Highlight the active row in this process's table
+                const panel = this.#parallelPanels[i];
+                if (panel) {
+                    Object.values(panel.rowsByTimestep).forEach(r => r.classList.remove("active"));
+                    panel.rowsByTimestep[timestep]?.classList.add("active");
+                }
+            });
+        } else {
+            const traversedArcUIDs = this.#activity.profile[timestep] || new Set();
+            for (const arcUID of traversedArcUIDs) {
+                this.#drawingManager.highlightArc(arcUID);
+            }
         }
     }
 

@@ -59,24 +59,28 @@ function classifyJoin(inc) {
         e.C === "" || e.C === "ϵ" ? "EPS" : e.C,
       );
 
-      const uniqueC = new Set(cValues);
       const hasEpsilon = cValues.some((v) => v === "EPS");
       const hasNonEpsilon = cValues.some((v) => v !== "EPS");
 
       if (hasEpsilon && hasNonEpsilon) {
         joinTypes.set(vertexId, "MIX");
-      } else if (uniqueC.size === 1) {
+      } else if (hasEpsilon && !hasNonEpsilon) {
+        // All epsilon — OR-join (same C-value)
         joinTypes.set(vertexId, "OR");
-      } else if (uniqueC.size === edges.length) {
-        joinTypes.set(vertexId, "AND");
       } else {
-        joinTypes.set(vertexId, "MIX");
+        // All Σ: AND if C-values differ, OR if all the same
+        const uniqueC = new Set(cValues);
+        if (uniqueC.size === 1) {
+          joinTypes.set(vertexId, "OR");
+        } else {
+          // Two or more different Σ C-values → AND-join (must synchronize)
+          joinTypes.set(vertexId, "AND");
+        }
       }
     }
   });
 
   console.log("Join Types:", joinTypes);
-
   return joinTypes;
 }
 
@@ -313,7 +317,9 @@ export function generateTraversalTreeFromJSON(
               for (let n of pair) Object.assign(mergedChoices, n.choices);
 
               if (joinType === "AND") {
-                let conditions = pair.map((n) => n.triggerC);
+                // let conditions = pair.map((n) => n.triggerC);
+                // let groupedC = `(${conditions.join(",")})`;
+                const conditions = [...new Set(pair.map((n) => n.triggerC))];
                 let groupedC = `(${conditions.join(",")})`;
 
                 // MERGE AND-JOINS TO PREVENT EXPLOSION
