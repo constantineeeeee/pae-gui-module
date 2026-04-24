@@ -146,7 +146,7 @@ export class ActivitySimulationManager {
                 for (const t of timesteps) {
                     const tr = document.createElement("tr");
                     tr.style.cursor = "pointer";
-                    tr.addEventListener("click", () => this.setCurrentTimestep(t));
+                    tr.addEventListener("click", () => this.setCurrentTimestepForProcess(i, t));
 
                     const tdTime = document.createElement("td");
                     tdTime.textContent = t;
@@ -240,6 +240,42 @@ export class ActivitySimulationManager {
             for (const arcUID of traversedArcUIDs) {
                 this.#drawingManager.highlightArc(arcUID);
             }
+        }
+    }
+
+    /**
+     * Highlights only the arcs for a specific process at the given timestep,
+     * using that process's assigned color. Clears all highlights first so only
+     * the clicked process's arcs are shown. Also marks the clicked row as active
+     * and clears active state from all other rows across all process tables.
+     *
+     * @param {number} processIndex - 0-based index of the process whose row was clicked
+     * @param {number} timestep
+     */
+    setCurrentTimestepForProcess(processIndex, timestep) {
+        this.#states.currentTimestep = timestep;
+
+        this.#drawingManager.clearHighlights();
+
+        const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
+
+        // Clear all active row highlights across every process table first
+        this.#parallelPanels.forEach(panel => {
+            Object.values(panel.rowsByTimestep).forEach(r => r.classList.remove("active"));
+        });
+
+        // Highlight only the clicked process's arcs
+        const activity = this.#activities[processIndex];
+        const color = colors[processIndex % colors.length];
+        const arcs = activity?.profile[timestep] ?? new Set();
+        for (const arcUID of arcs) {
+            this.#drawingManager.highlightArc(arcUID, color);
+        }
+
+        // Mark the clicked row as active
+        const panel = this.#parallelPanels[processIndex];
+        if (panel) {
+            panel.rowsByTimestep[timestep]?.classList.add("active");
         }
     }
 
