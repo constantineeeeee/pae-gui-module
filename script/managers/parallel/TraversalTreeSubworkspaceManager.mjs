@@ -237,16 +237,21 @@ export default class TraversalTreeViewerManager {
 
   // ─── Edge drawing ────────────────────────────────────────────────────────────
 
-  #drawEdge(edgeG, x1, y1, x2, y2, label) {
+  #drawEdge(edgeG, x1, y1, x2, y2, label, opts = {}) {
+    const stroke = opts.stroke || "currentColor";
+    const strokeWidth = opts.strokeWidth || "1.8";
+    const opacity = opts.opacity || "0.85";
+    const markerId = opts.markerId || "tt-arrow";
+
     const line = document.createElementNS(SVG_NS, "line");
     line.setAttribute("x1", String(x1));
     line.setAttribute("y1", String(y1));
     line.setAttribute("x2", String(x2));
     line.setAttribute("y2", String(y2));
-    line.setAttribute("stroke", "currentColor");
-    line.setAttribute("stroke-width", "1.8");
-    line.setAttribute("opacity", "0.85");
-    line.setAttribute("marker-end", "url(#tt-arrow)");
+    line.setAttribute("stroke", stroke);
+    line.setAttribute("stroke-width", strokeWidth);
+    line.setAttribute("opacity", opacity);
+    line.setAttribute("marker-end", `url(#${markerId})`);
     edgeG.appendChild(line);
 
     if (label !== undefined && label !== null) {
@@ -293,6 +298,36 @@ export default class TraversalTreeViewerManager {
     tip.setAttribute("fill", "currentColor");
     marker.appendChild(tip);
     defs.appendChild(marker);
+
+    // ── Path color palette and per-color arrowheads ───────────────────────────
+    const PATH_COLORS = [
+      "#3a81de", // blue
+      "#4caf50", // green
+      "#ff9800", // orange
+      "#9c27b0", // purple
+      "#e91e63", // pink
+      "#00bcd4", // cyan
+      "#795548", // brown
+      "#607d8b", // blue-grey
+    ];
+
+    // Create one arrowhead marker per palette color so arrows match edges
+    PATH_COLORS.forEach((color, idx) => {
+      const m = make("marker");
+      m.setAttribute("id", `tt-arrow-${idx}`);
+      m.setAttribute("viewBox", "0 0 10 10");
+      m.setAttribute("refX", "9");
+      m.setAttribute("refY", "5");
+      m.setAttribute("markerWidth", "6");
+      m.setAttribute("markerHeight", "6");
+      m.setAttribute("orient", "auto-start-reverse");
+      const t = make("path");
+      t.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+      t.setAttribute("fill", color);
+      m.appendChild(t);
+      defs.appendChild(m);
+    });
+
     this.#svg.appendChild(defs);
 
     // ── Build spanning tree backbone (single parent per node) ─────────────────
@@ -415,7 +450,81 @@ export default class TraversalTreeViewerManager {
       finalPos.set(n.id, { id: n.id, v: n.v, ...dims });
     }
 
-    // ── Render edges: ALL parent → child connections ──────────────────────────
+    // ── Draw synchronization bars between nodes sharing a joinGroupId ─────────
+    // This covers two cases:
+    //   1. Placeholder nodes (isPlaceholder=true) from OR/MIX-joins — these
+    //      already had joinGroupId set during tree generation.
+    //   2. Arrival nodes tagged isOrSubgroupMember=true — these are the actual
+    //      pending-merge nodes at an AND-join where multiple incoming arcs share
+    //      the same C-value (Structure 8). No extra placeholder is inserted;
+    //      the sync bar is drawn directly between these arrival nodes.
+    {
+      const groupBuckets = new Map();
+      for (const n of res.allNodes) {
+        const gid = n.joinGroupId;
+        if (!gid) continue;
+        // Include placeholders AND tagged OR-subgroup members
+        if (!this.#isPlaceholder(n) && !n.isOrSubgroupMember) continue;
+        const pos = finalPos.get(n.id);
+        if (!pos) continue;
+        if (!groupBuckets.has(gid)) groupBuckets.set(gid, []);
+        groupBuckets.get(gid).push(pos);
+      }
+
+      for (const [, positions] of groupBuckets) {
+        if (positions.length < 2) continue;
+        const xs = positions.map(p => p.x + (p.w ?? 0) / 2);
+        const ys = positions.map(p => p.yMid);
+        const avgX = xs.reduce((a, b) => a + b, 0) / xs.length;
+        const yMin = Math.min(...ys);
+        const yMax = Math.max(...ys);
+
+        const bar = document.createElementNS(SVG_NS, "line");
+        bar.setAttribute("x1", String(avgX));
+        bar.setAttribute("y1", String(yMin));
+        bar.setAttribute("x2", String(avgX));
+        bar.setAttribute("y2", String(yMax));
+        bar.setAttribute("stroke", "currentColor");
+        bar.setAttribute("stroke-width", "1.6");
+        bar.setAttribute("opacity", "0.6");
+        edgeGroup.appendChild(bar);
+      }
+    }
+
+    // ── Build maximal-path → edges map ─────────────────────────────────────
+    // For each maximal path leaf, walk parents back to root collecting all
+    // edges (parent→child pairs) along the path. An edge can belong to
+    // multiple paths if those paths share a prefix or merge.
+    const edgePaths = new Map();   // "parentId->childId" → Set<pathIndex>
+    const nodePaths = new Map();   // nodeId → Set<pathIndex>
+
+    const addNode = (id, pi) => {
+      if (!nodePaths.has(id)) nodePaths.set(id, new Set());
+      nodePaths.get(id).add(pi);
+    };
+    const addEdge = (key, pi) => {
+      if (!edgePaths.has(key)) edgePaths.set(key, new Set());
+      edgePaths.get(key).add(pi);
+    };
+
+    const maxPaths = res.maximalPaths ?? [];
+    maxPaths.forEach((leaf, pathIndex) => {
+      // Walk backwards from leaf via parents (visit each node once per path)
+      const visited = new Set();
+      const stack = [leaf];
+      while (stack.length) {
+        const n = stack.pop();
+        if (!n || visited.has(n.id)) continue;
+        visited.add(n.id);
+        addNode(n.id, pathIndex);
+        for (const p of n.parents ?? []) {
+          addEdge(`${p.id}->${n.id}`, pathIndex);
+          stack.push(p);
+        }
+      }
+    });
+
+    // ── Render edges with per-path coloring ────────────────────────────────
     for (const n of res.allNodes) {
       const to = finalPos.get(n.id);
       if (!to) continue;
@@ -424,19 +533,49 @@ export default class TraversalTreeViewerManager {
         const from = finalPos.get(p.id);
         if (!from) continue;
 
-        // Only label the edge with i= on non-placeholder targets
-        // (placeholder nodes are intermediaries; the label goes on the
-        //  final labeled node after the placeholder)
         const label = this.#isPlaceholder(n) ? null : n.time;
 
-        this.#drawEdge(
-          edgeGroup,
-          from.xOut + 4,
-          from.yMid,
-          to.xIn - 2,
-          to.yMid,
-          label,
-        );
+        const edgeKey = `${p.id}->${n.id}`;
+        const pathIndices = [...(edgePaths.get(edgeKey) ?? [])].sort((a, b) => a - b);
+
+        if (pathIndices.length === 0) {
+          // Edge not on any maximal path — render in default style
+          this.#drawEdge(
+            edgeGroup,
+            from.xOut + 4, from.yMid,
+            to.xIn - 2, to.yMid,
+            label,
+          );
+        } else if (pathIndices.length === 1) {
+          // Single-path edge — use that path's color
+          const ci = pathIndices[0] % PATH_COLORS.length;
+          this.#drawEdge(
+            edgeGroup,
+            from.xOut + 4, from.yMid,
+            to.xIn - 2, to.yMid,
+            label,
+            { stroke: PATH_COLORS[ci], strokeWidth: "2.4", opacity: "0.95",
+              markerId: `tt-arrow-${ci}` },
+          );
+        } else {
+          // Shared edge across multiple paths — draw stacked offset lines,
+          // one per path color, so all colors are visible.
+          const N = pathIndices.length;
+          const SPREAD = 4; // px offset between stacked lines
+          pathIndices.forEach((pi, idx) => {
+            const ci = pi % PATH_COLORS.length;
+            // Distribute lines symmetrically around the centerline
+            const offset = (idx - (N - 1) / 2) * SPREAD;
+            this.#drawEdge(
+              edgeGroup,
+              from.xOut + 4, from.yMid + offset,
+              to.xIn - 2, to.yMid + offset,
+              idx === 0 ? label : null, // only label once
+              { stroke: PATH_COLORS[ci], strokeWidth: "2.0", opacity: "0.85",
+                markerId: `tt-arrow-${ci}` },
+            );
+          });
+        }
       }
     }
 
@@ -473,17 +612,37 @@ export default class TraversalTreeViewerManager {
     };
 
     if (res.maximalPaths && res.maximalPaths.length > 0) {
+      const PATH_COLORS = [
+        "#3a81de", "#4caf50", "#ff9800", "#9c27b0",
+        "#e91e63", "#00bcd4", "#795548", "#607d8b",
+      ];
+
       const list = document.createElement("div");
       list.style.cssText =
         "display:flex;flex-direction:column;gap:6px;font-size:12px;";
 
-      for (const b of res.maximalPaths) {
+      res.maximalPaths.forEach((b, pathIndex) => {
+        const color = PATH_COLORS[pathIndex % PATH_COLORS.length];
+
         const row = document.createElement("div");
         row.style.cssText =
-          "padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.1);";
-        row.textContent = `${b.v}  —  ${fmtS(b.S)}`;
+          "padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.1);" +
+          "display:flex;align-items:center;gap:8px;";
+
+        // Color swatch matching the path's edges in the tree
+        const swatch = document.createElement("span");
+        swatch.style.cssText =
+          `display:inline-block;width:12px;height:12px;border-radius:3px;` +
+          `background:${color};flex-shrink:0;`;
+        row.appendChild(swatch);
+
+        const labelEl = document.createElement("span");
+        labelEl.textContent = `Path ${pathIndex + 1}: ${b.v}  —  ${fmtS(b.S)}`;
+        labelEl.style.cssText = "flex:1;";
+        row.appendChild(labelEl);
+
         list.appendChild(row);
-      }
+      });
 
       parallelHost.appendChild(list);
     } else {

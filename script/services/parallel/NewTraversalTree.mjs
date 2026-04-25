@@ -133,6 +133,14 @@ export function generateTraversalTreeFromJSON(
   // --- NEW: GLOBAL STATE REGISTRY TO PREVENT DUPLICATE INTERLEAVINGS ---
   const stateRegistry = new Map();
 
+  // Per-join-vertex group registry — reuses one group id per joinV so all
+  // placeholders feeding into the same join vertex share a sync bar.
+  const joinGroupByVertex = new Map();
+  const getJoinGroup = (v) => {
+    if (!joinGroupByVertex.has(v)) joinGroupByVertex.set(v, `JG_${v}`);
+    return joinGroupByVertex.get(v);
+  };
+
   function getStateSignature(v, visitsMap, choices) {
     const keys = Object.keys(visitsMap).sort();
     const visitStr = keys.map(k => `${k}:${visitsMap[k]}`).join("|");
@@ -232,23 +240,55 @@ export function generateTraversalTreeFromJSON(
           choices: { ...nodeX.choices },
         };
 
+        // For OR-joins (and any vertex with multiple incoming arcs whose
+        // type is OR), splice a placeholder between nodeX and newNode so
+        // the renderer can show a (yj) intermediary plus a sync bar shared
+        // by all incoming branches arriving at yj.
+        const yjJoinType = joinTypes.get(yj);
+        if (yjJoinType === "OR" && (inc.get(yj)?.length ?? 0) > 1) {
+          const groupId = getJoinGroup(yj);
+          const ph = {
+            id: `T_${i++}`,
+            v: yj,
+            S: [...nodeX.S],
+            parents: [nodeX],
+            children: [newNode],
+            isPending: false,
+            isCycleTerminal: false,
+            edgeVisits: { ...nodeX.edgeVisits },
+            path: [...nodeX.path],
+            triggerEdge: null,
+            triggerC: null,
+            choices: { ...nodeX.choices },
+            isPlaceholder: true,
+            joinGroupId: groupId,
+          };
+          // Re-link: nodeX → ph → newNode
+          newNode.parents = [ph];
+          allNodes.push(ph);
+          // nodeX.children push of ph happens below in the existing logic
+          // (it currently pushes newNode to nodeX.children — replace with ph)
+          // We mark newNode so the existing push logic treats it correctly:
+          newNode._orChildOfPh = ph; // signal to push ph instead of newNode below
+        }
+
         stateRegistry.set(sig, newNode); // Register the new unique state
 
         if (isAncestor) {
           if (cVal === EPS && edge.L === undefined) {
             newNode.S.push(`cycle_resolved_${yj}`);
             newNode.isCycleTerminal = true;
-            nodeX.children.push(newNode);
+            nodeX.children.push(newNode._orChildOfPh ?? newNode);
             allNodes.push(newNode);
           } else {
-            nodeX.children.push(newNode);
+            nodeX.children.push(newNode._orChildOfPh ?? newNode);
             allNodes.push(newNode);
             const joinType = joinTypes.get(yj);
             if (joinType === "AND" || joinType === "MIX")
               newNode.isPending = true;
           }
         } else {
-          nodeX.children.push(newNode);
+          nodeX.children.push(newNode._orChildOfPh ?? newNode);
           allNodes.push(newNode);
           const joinType = joinTypes.get(yj);
           if (joinType === "AND" || joinType === "MIX")
@@ -272,6 +312,27 @@ export function generateTraversalTreeFromJSON(
         for (let [joinV, nodesAtJoin] of pendingByVertex.entries()) {
           const requiredIncomingCount = inc.get(joinV).length;
 
+          // Group pending nodes by their C-condition (not by triggerEdge).
+          // Two incoming arcs sharing the same C contribute the same condition
+          // to the merged state, so they're interchangeable for the merge —
+          // the algorithm should enumerate combinations across DISTINCT
+          // C-values, not across edges.
+          let nodesByCondition = new Map();
+          for (let n of nodesAtJoin) {
+            const key = n.triggerC;
+            if (!nodesByCondition.has(key)) nodesByCondition.set(key, []);
+            nodesByCondition.get(key).push(n);
+          }
+
+          // The required number of distinct conditions equals the number of
+          // distinct C-values across the join's incoming arcs.
+          const incomingCs = new Set(
+            inc.get(joinV).map((e) => (e.C === "" || e.C === "ϵ" ? EPS : e.C))
+          );
+          const requiredConditionCount = incomingCs.size;
+
+          // Keep the original edge-grouping for reference (still useful for
+          // checking that every required edge has at least one pending node).
           let nodesByEdge = new Map();
           for (let n of nodesAtJoin) {
             if (!nodesByEdge.has(n.triggerEdge))
@@ -279,8 +340,8 @@ export function generateTraversalTreeFromJSON(
             nodesByEdge.get(n.triggerEdge).push(n);
           }
 
-          if (nodesByEdge.size === requiredIncomingCount) {
-            const branchArrays = Array.from(nodesByEdge.values());
+          if (nodesByCondition.size === requiredConditionCount) {
+            const branchArrays = Array.from(nodesByCondition.values());
             const combinations = branchArrays.reduce(
               (a, b) => a.flatMap((d) => b.map((e) => [d, e].flat())),
               [[]],
@@ -302,6 +363,21 @@ export function generateTraversalTreeFromJSON(
             };
 
             let validCombinations = combinations.filter(isValidCombination);
+
+            // For each C-value bucket with > 1 node (OR-subgroup within an AND-join),
+            // tag all those arrival nodes with a shared joinGroupId so the renderer can
+            // draw a vertical sync bar between them. We do NOT insert extra placeholder
+            // nodes — that would perturb the D3 layout. The sync bar is purely visual.
+            for (const [cVal, bucket] of nodesByCondition.entries()) {
+              if (bucket.length > 1) {
+                const orGroupId = `JG_OR_${joinV}_${cVal}`;
+                for (const bNode of bucket) {
+                  bNode.joinGroupId = orGroupId;
+                  bNode.isOrSubgroupMember = true;
+                }
+              }
+            }
+
             let mergedNodesThisIteration = new Set();
 
             for (let pair of validCombinations) {
@@ -317,12 +393,16 @@ export function generateTraversalTreeFromJSON(
               for (let n of pair) Object.assign(mergedChoices, n.choices);
 
               if (joinType === "AND") {
-                // let conditions = pair.map((n) => n.triggerC);
-                // let groupedC = `(${conditions.join(",")})`;
+                // AND-join merge.
+                //
+                // When multiple incoming arcs share the same C-value (Structure 8),
+                // those nodes form an OR-subgroup. We tagged them above with a shared
+                // joinGroupId so the renderer draws a sync bar between them. The merge
+                // itself uses the pair as-is — one node per distinct C-value.
+
                 const conditions = [...new Set(pair.map((n) => n.triggerC))];
                 let groupedC = `(${conditions.join(",")})`;
 
-                // MERGE AND-JOINS TO PREVENT EXPLOSION
                 let tempVisits = {};
                 for (let n of pair) {
                   for (let [edge, count] of Object.entries(n.edgeVisits || {})) {
@@ -349,14 +429,25 @@ export function generateTraversalTreeFromJSON(
                 let nodeC = pair.find((n) => n.triggerC !== EPS);
 
                 if (nodeEps && nodeC) {
+                  // MIX-AND merged path: both arcs converge with state (ε, c)
+                  // Insert placeholders for both parents (sync bar at joinV)
                   let mixAndChoices = { ...mergedChoices, [joinV]: "AND" };
-                  createMergedNode(pair, joinV, [...basePrefix, `(${EPS},${nodeC.triggerC})`], mixAndChoices);
+                  const phPair = insertJoinPlaceholders(pair, joinV);
+                  createMergedNode(phPair, joinV, [...basePrefix, `(${EPS},${nodeC.triggerC})`], mixAndChoices);
 
+                  // MIX-OR independent path: only the Σ arc passes through.
+                  // Add a placeholder for the Σ parent only — same group id so
+                  // the sync bar visually associates the OR-leg with the join.
                   let mixOrChoices = { ...nodeC.choices, [joinV]: "OR" };
-                  createMergedNode([nodeC], joinV, [...nodeC.S], mixOrChoices);
+                  const [phC] = insertJoinPlaceholders([nodeC], joinV);
+                  createMergedNode([phC], joinV, [...nodeC.S], mixOrChoices);
                 }
               }
               for (let n of pair) mergedNodesThisIteration.add(n);
+              // Also clear all OR-subgroup members so they don't stay pending.
+              for (const [, bucket] of nodesByCondition.entries()) {
+                for (const bNode of bucket) mergedNodesThisIteration.add(bNode);
+              }
             }
 
             for (let n of mergedNodesThisIteration) n.isPending = false;
@@ -369,6 +460,44 @@ export function generateTraversalTreeFromJSON(
         traversalActive = false;
       }
     }
+  }
+
+  // ── Helper: insert placeholder nodes between parents and a join target ──
+  // Creates one placeholder per parent and links parent → placeholder → target.
+  // All placeholders share the same `joinGroupId` so the renderer can draw a
+  // vertical synchronization bar between them. Returns the placeholder array
+  // (so callers can attach them to the merged/labeled output as parents).
+  function insertJoinPlaceholders(parents, joinV) {
+    const groupId = getJoinGroup(joinV);
+    const placeholders = [];
+    for (const p of parents) {
+      const ph = {
+        id: `T_${i++}`,
+        v: joinV,
+        S: [...p.S],            // carries through the parent's current state
+        parents: [p],
+        children: [],
+        isPending: false,
+        isCycleTerminal: false,
+        edgeVisits: { ...(p.edgeVisits || {}) },
+        path: [...(p.path || [])],
+        triggerEdge: null,
+        triggerC: null,
+        choices: { ...(p.choices || {}) },
+        // Placeholder flags — recognized by the renderer
+        isPlaceholder: true,
+        joinGroupId: groupId,
+      };
+      // Splice placeholder between parent and downstream:
+      //   parent.children should keep parent → ph; the merged target will be
+      //   created by the caller and link from ph rather than from p directly.
+      // We don't remove p.children here because the caller (createMergedNode
+      //   etc.) will be passed `placeholders` as the new parents instead of `pair`.
+      p.children.push(ph);
+      allNodes.push(ph);
+      placeholders.push(ph);
+    }
+    return placeholders;
   }
 
   function createMergedNode(parents, joinV, mergedS, choices) {

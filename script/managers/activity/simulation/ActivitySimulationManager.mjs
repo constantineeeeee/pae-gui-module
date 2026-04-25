@@ -99,6 +99,11 @@ export class ActivitySimulationManager {
         this.#drawingManager = new BaseModelDrawingManager(rootElement.querySelector(".drawing > svg"), "aes");
         this.#subworkspaceManager = new ASSubworkspaceManager(this, rootElement);
 
+        // Show "View Traversal Tree" only when there are multiple parallel activities
+        this.#subworkspaceManager.setTraversalTreeButtonVisible(
+            this.#isParallel && this.#activities.length > 1
+        );
+
         this.#panels = {
             details: new ASDetailsPanelManager(this, rootElement.querySelector(".panel[data-panel-id='details']")),
             profile: new ASProfilePanelManager(this, rootElement.querySelector(".panel[data-panel-id='profile']")),
@@ -227,6 +232,33 @@ export class ActivitySimulationManager {
             this.setCurrentTimestep(this.#states.currentTimestep-1);
             return;
         }
+    }
+
+    /**
+     * Open the Traversal Tree subworkspace and pass the parallel activity
+     * profiles so the tree can highlight each activity's path in its own color.
+     */
+    async openTraversalTree() {
+        const { default: TraversalTreeSubworkspaceManager } =
+            await import("../../parallel/TraversalTreeSubworkspaceManager.mjs");
+
+        // Convert each activity's profile to a sorted sequence of arc UIDs
+        // by timestep — the tree manager uses this to match its symbolic
+        // paths against the actual PAE-generated activities.
+        const activityArcSequences = this.#activities.map((a, i) => ({
+            index: i,
+            name:  a.name,
+            arcsByTimestep: Object.entries(a.profile)
+                .map(([t, arcs]) => ({
+                    timestep: Number(t),
+                    arcUIDs:  [...arcs],
+                }))
+                .sort((x, y) => x.timestep - y.timestep),
+        }));
+
+        new TraversalTreeSubworkspaceManager(this.context, this.#modelSnapshot, {
+            activityArcSequences,
+        });
     }
 
     // setCurrentTimestep(timestep) {

@@ -72,7 +72,21 @@ export class ASSubworkspaceManager {
             case "next": 
                 this.#simulationManager.next();
             break;
+            case "traversal-tree":
+                this.#simulationManager.openTraversalTree();
+            break;
         }
+    }
+
+    /**
+     * Show or hide the traversal tree button based on whether the simulation
+     * has multiple parallel activities. Called by ActivitySimulationManager
+     * after it determines isParallel.
+     * @param {boolean} visible
+     */
+    setTraversalTreeButtonVisible(visible) {
+        const btn = this.#view.buttons.actions["traversal-tree"];
+        if (btn) btn.style.display = visible ? "" : "none";
     }
 
     #initializeTabs() {
