@@ -50,6 +50,9 @@ export class ActivitySimulationManager {
     /** @type {{ rowsByTimestep: { [t: number]: HTMLTableRowElement }, color: string }[]} */
     #parallelPanels = [];
 
+    /** @type {number[]} — arc UIDs to permanently highlight red (competing arcs) */
+    #competingArcUIDs = [];
+
     /** 
      * @type {{
      *  currentTimestep: number,
@@ -81,6 +84,11 @@ export class ActivitySimulationManager {
         // Max timestep is the highest across ALL profiles
         const allTimesteps = this.#activities.flatMap(a => Object.keys(a.profile).map(Number));
         this.#states.maxTimestep = allTimesteps.length > 0 ? Math.max(...allTimesteps) : 1;
+
+        // Collect competing arc UIDs from any activity in the group
+        this.#competingArcUIDs = this.#activities
+            .flatMap(a => a.competingArcUIDs ?? [])
+            .filter((uid, i, arr) => arr.indexOf(uid) === i); // deduplicate
 
         this.#initialize();
     }
@@ -153,12 +161,35 @@ export class ActivitySimulationManager {
 
                     const tdArcs = document.createElement("td");
                     tdArcs.className = "as-profile-reachables";
+
+                    // Track whether any arc in this timestep is a competing arc
+                    let hasCompetingArc = false;
+
                     for (const arcUID of activity.profile[t]) {
                         const [from, to] = this.getArcIdentifierPair(arcUID);
                         const tag = document.createElement("div");
                         tag.className = "arc-tag";
                         tag.innerHTML = `<div>${from}</div><div>${to}</div>`;
+
+                        // Highlight competing arc tags red
+                        if (this.#competingArcUIDs.includes(arcUID)) {
+                            tag.style.cssText = "background:#ffe5e5;color:#c0392b;border:1px solid #e74c3c;border-radius:4px;";
+                            hasCompetingArc = true;
+                        }
+
                         tdArcs.appendChild(tag);
+                    }
+
+                    // Mark the whole row red if it contains a competing arc
+                    if (hasCompetingArc) {
+                        tr.style.background = "#fff0f0";
+                        // Add a small "⚠ impeded" badge
+                        const badge = document.createElement("span");
+                        badge.textContent = " ⚠";
+                        badge.title = "Competing arc — activity impeded here";
+                        badge.style.color = "#e74c3c";
+                        badge.style.fontWeight = "bold";
+                        tdTime.appendChild(badge);
                     }
 
                     tr.appendChild(tdTime);
@@ -219,6 +250,11 @@ export class ActivitySimulationManager {
 
         this.#drawingManager.clearHighlights();
 
+        // Always re-apply red highlight for competing arcs (persists across timesteps)
+        for (const arcUID of this.#competingArcUIDs) {
+            this.#drawingManager.highlightArc(arcUID, "#e74c3c");
+        }
+
         if (this.#isParallel) {
             const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
             this.#activities.forEach((activity, i) => {
@@ -256,6 +292,11 @@ export class ActivitySimulationManager {
         this.#states.currentTimestep = timestep;
 
         this.#drawingManager.clearHighlights();
+
+        // Re-apply red for competing arcs before showing process-specific highlight
+        for (const arcUID of this.#competingArcUIDs) {
+            this.#drawingManager.highlightArc(arcUID, "#e74c3c");
+        }
 
         const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
 

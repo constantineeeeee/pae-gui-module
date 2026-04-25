@@ -49,6 +49,9 @@ export default class Activity {
     /** @type {string | null} */
     parallelGroupId;
 
+    /** @type {number[]} — arc UIDs that caused competition (PAE only) */
+    competingArcUIDs;
+
     /**
      * @param {{ 
      *     id: string, 
@@ -72,5 +75,6 @@ export default class Activity {
         this.profile = values.profile;
         this.tor = values.tor;
         this.parallelGroupId = values.parallelGroupId || null;
+        this.competingArcUIDs = values.competingArcUIDs || [];
     }
 }

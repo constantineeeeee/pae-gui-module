@@ -114,11 +114,17 @@ export class PAESimulationManager {
             rbsMatrix:   buildRBSMatrix(vertexMap, arcs),
         };
 
+        // Build a plain simpleModel object for checkCompetingProcesses
+        // (in impedance-freeness.mjs) so it can read arc L-values.
+        // `arcs` and `vertices` are already defined above.
+        const simpleModel = { arcs, components: vertices };
+
         // Run PAE — the algorithm executes fully here (not step-by-step)
         this.#result = parallelActivityExtraction(
             this.configs.source,
             this.configs.sink,
             this.#cache.aeCache,
+            simpleModel,            // passed to checkCompetingProcesses
         );
 
         // Flatten the result into a display-friendly list
@@ -201,6 +207,34 @@ export class PAESimulationManager {
             };
         }
 
+        const log = this.competitionLog;
+
+        if (log.length > 0 && !this.isParallel) {
+            // Build a human-readable list of competing arcs
+            const arcDescriptions = log.map((entry) => {
+                const [from, to] = this.getArcIdentifierPair(entry.arcUID);
+                const fromStr = from || `uid=${entry.arcUID}`;
+                const toStr   = to   || "?";
+                return (
+                    `arc (${fromStr} → ${toStr}) with L=${entry.arcL}: ` +
+                    `${entry.loserProcessIds.length + 1} process(es) competed — ` +
+                    `process ${entry.winnerProcessId} won, ` +
+                    `process(es) ${entry.loserProcessIds.join(", ")} locked`
+                );
+            });
+
+            return {
+                pass:  false,
+                title: "Activities found but are not parallel — competing processes detected",
+                description:
+                    `${this.groupCount} group(s) of activities were extracted, but ` +
+                    `${log.length} arc(s) caused process competition, preventing parallelism. ` +
+                    "Competing processes occur when more parallel processes attempt to traverse " +
+                    "the same arc than its L-attribute allows. Arcs highlighted in red below:\n" +
+                    arcDescriptions.map((d) => `• ${d}`).join("\n"),
+            };
+        }
+
         if (!this.isParallel) {
             return {
                 pass:        false,
@@ -221,6 +255,30 @@ export class PAESimulationManager {
                 "do not interrupt each other, have no competing processes, and " +
                 "complete at the same time step.",
         };
+    }
+
+    /**
+     * Returns the competition log from the PAE result.
+     * Each entry describes one arc where process competition occurred.
+     *
+     * @returns {import("../../../services/pae.mjs").CompetitionEntry[]}
+     */
+    get competitionLog() {
+        return this.#result?.competitionLog ?? [];
+    }
+
+    /**
+     * Returns the set of arc UIDs that triggered competition (to be
+     * coloured red in the drawing view).
+     *
+     * @returns {Set<number>}
+     */
+    getCompetingArcUIDs() {
+        const arcs = new Set();
+        for (const entry of this.competitionLog) {
+            arcs.add(entry.arcUID);
+        }
+        return arcs;
     }
 
     /**
@@ -337,13 +395,41 @@ export class PAESimulationManager {
      * @returns {typeof this.#processEntries}
      */
     #flattenResult(result) {
-        if (!result || result.parallelActivitySets.length === 0) return [];
+        if (!result) return [];
 
+        // If parallel: use the grouped sets
+        if (result.isParallel && result.parallelActivitySets.length > 0) {
+            const entries = [];
+            result.parallelActivitySets.forEach((actSet, groupIndex) => {
+                for (const entry of actSet) {
+                    entries.push({
+                        processId:       entry.processId,
+                        groupIndex,
+                        activityProfile: entry.activityProfile,
+                    });
+                }
+            });
+            return entries;
+        }
+
+        // If not parallel (competition/deadlock): use allProcessResults which
+        // includes both completed AND impeded (locked) processes so the user
+        // can see each process's partial profile in the simulation view.
+        if (result.allProcessResults?.length > 0) {
+            return result.allProcessResults.map((entry, idx) => ({
+                processId:       entry.processId,
+                groupIndex:      0,
+                activityProfile: entry.activityProfile,
+            }));
+        }
+
+        // Fallback: flatten parallelActivitySets if allProcessResults missing
+        if (result.parallelActivitySets.length === 0) return [];
         const entries = [];
         result.parallelActivitySets.forEach((actSet, groupIndex) => {
             for (const entry of actSet) {
                 entries.push({
-                    processId:      entry.processId,
+                    processId:       entry.processId,
                     groupIndex,
                     activityProfile: entry.activityProfile,
                 });

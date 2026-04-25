@@ -117,8 +117,73 @@ export default class ExecutePanelManager {
                 await paeManager.ready;
 
                 const conclusion = paeManager.getConclusion();
-                if(paeManager.isDeadlock) {
-                    alert(`PAE Result: ${conclusion.title}\n\n${conclusion.description}`);
+
+                // ── Highlight competing arcs red on the main model canvas ──────
+                const competingArcs = paeManager.getCompetingArcUIDs();
+                const drawingView   = this.context.managers.drawing;
+                if (competingArcs.size > 0 && drawingView) {
+                    for (const arcUID of competingArcs) {
+                        drawingView.highlightArc(arcUID, "red");
+                    }
+                }
+
+                if (paeManager.isDeadlock || !paeManager.isParallel) {
+                    const entries        = paeManager.getProcessEntries();
+                    const competitionLog = paeManager.competitionLog;
+                    // Collect competing arc UIDs — same for all processes in the group
+                    const competingArcUIDs = [...paeManager.getCompetingArcUIDs()];
+
+                    const arcDescriptions = competitionLog.map((e) => {
+                        const [from, to] = paeManager.getArcIdentifierPair(e.arcUID);
+                        return `(${from || "?"}→${to || "?"}) L=${e.arcL}, used by ${
+                            (e.usedByProcessIds ?? [e.winnerProcessId, ...e.loserProcessIds]).length
+                        } activities`;
+                    });
+
+                    if (entries.length === 0) {
+                        // No processes completed — one placeholder failed activity
+                        this.context.managers.activities.addActivity(new Activity({
+                            name:             name?.trim() || "<Untitled PAE>",
+                            source:           Number(source),
+                            sink:             Number(sink),
+                            origin:           "pae",
+                            conclusion,
+                            profile:          {},
+                            tor:              {},
+                            competingArcUIDs,
+                        }));
+                    } else {
+                        // One failed Activity per process so user can simulate each
+                        const parallelGroupId = crypto.randomUUID();
+                        entries.forEach((entry, idx) => {
+                            const label = entries.length === 1
+                                ? (name?.trim() || "<Untitled PAE>")
+                                : `${name?.trim() || "<Untitled PAE>"} — Process ${idx + 1}`;
+
+                            const processConclusion = {
+                                pass:        false,
+                                title:       conclusion.title,
+                                description: competitionLog.length > 0
+                                    ? `Competing arcs:\n${arcDescriptions.map(d => "• " + d).join("\n")}`
+                                    : conclusion.description,
+                            };
+
+                            this.context.managers.activities.addActivity(new Activity({
+                                name:             label,
+                                source:           Number(source),
+                                sink:             Number(sink),
+                                origin:           "pae",
+                                parallelGroupId,
+                                conclusion:       processConclusion,
+                                profile:          entry.activityProfile,
+                                tor:              {},
+                                competingArcUIDs, // highlighted red in simulation view
+                            }));
+                        });
+                    }
+
+                    this.context.managers.workspace.gotoMainModel();
+                    this.context.managers.workspace.showPanel("execute");
                     return;
                 }
 
