@@ -7,7 +7,6 @@ Key differences from aes.mjs (sequential AE):
   - No backtracking — pending processes wait at join points
   - eRU is enforced across ALL processes combined, not per-process
   - Splits spawn new child processes
-  - Competition: lowest process ID wins, losers are locked
   - Process interruption: exiting an RBS while a sibling is still inside
 */
 
@@ -75,9 +74,6 @@ import { Cycle } from "./soundness/utils/cycle.mjs";
  * } | null} PAEResult
  */
 
-// =============================================================================
-// SECTION 1 — Process lifecycle
-// =============================================================================
 
 export function createProcess(id, startVertex) {
   return {
@@ -127,10 +123,6 @@ export function markProcessPending(process, arcUID) {
   process.pendingArcUID = arcUID;
 }
 
-// =============================================================================
-// SECTION 2 — Split handling
-// =============================================================================
-
 export function getSplitType(vertexUID, cache) {
   const { arcsMatrix, arcMap } = cache;
   const outgoing = [...getOutgoingArcs(vertexUID, arcsMatrix)];
@@ -157,10 +149,6 @@ export function spawnProcessesFromSplit(parentProcess, splitArcUIDs, idCounter) 
   }
   return spawned;
 }
-
-// =============================================================================
-// SECTION 3 — Join detection and resolution
-// =============================================================================
 
 /**
  * Returns the set of vertex UIDs reachable from `startUID` by following
@@ -346,91 +334,81 @@ export function resolvePendingProcesses(processes, joinVertexUID, cache, idCount
     arcsByC.get(c).push(uid);
   }
 
-  // Build Cartesian product of arc choices, one per C-group
-  let variants = [[]]; // each variant is an array of arcUIDs
-  for (const [, arcsInGroup] of arcsByC.entries()) {
-    const next = [];
-    for (const variant of variants) {
-      for (const arcUID of arcsInGroup) {
-        next.push([...variant, arcUID]);
-      }
+  // ── Process-level variant generation ──────────────────────────────────────
+  // Build variants based on PROCESSES pending at each C-group, not just arcs.
+  // For each C-group, list all pending processes (across all arcs in that
+  // group). Then take the Cartesian product across C-groups, generating one
+  // mergeGroup per combination of (one process per C-group).
+  //
+  // The number of variants equals the product of process counts per C-group.
+  // Example: C='h' has 4 pending processes, C='c' has 2 pending processes →
+  // 4 × 2 = 8 variants? No — we want max(4, 2) = 4 variants, pairing each
+  // 'h' process with its OWN 'c' process (cloning 'c' processes as needed).
+
+  // Build C → processes map
+  const processesPerC = new Map(); // C-value → Process[]
+  for (const [c, arcUIDs] of arcsByC.entries()) {
+    const allProcs = [];
+    for (const uid of arcUIDs) {
+      const procs = pendingByArc.get(uid) ?? [];
+      allProcs.push(...procs);
     }
-    variants = next;
+    allProcs.sort((a, b) => a.id - b.id);
+    processesPerC.set(c, allProcs);
   }
 
-  // For each variant, build the corresponding mergeGroup of processes by
-  // matching arcUID → pending process. If multiple processes are pending on
-  // the same arcUID, pick the lowest ID for the first variant that uses
-  // that arc, etc.
-  // Track which processes have already been "consumed" by an earlier variant
-  // for unique arcs (per-variant ownership). For shared single-arc C-groups,
-  // we'll clone the process for each variant beyond the first.
+  // The number of variants = max process count across all C-groups.
+  // Each variant takes ONE process per C-group; if a C-group runs out of
+  // unique processes, we clone its lowest-ID process.
+  let maxProcs = 0;
+  for (const [, procs] of processesPerC) maxProcs = Math.max(maxProcs, procs.length);
 
-  // First pass: pre-identify processes per arc
-  const processesPerArc = new Map(); // arcUID → Process[] sorted by ID
-  for (const uid of incomingArcs) {
-    const procs = pendingByArc.get(uid) ?? [];
-    procs.sort((a, b) => a.id - b.id);
-    processesPerArc.set(uid, [...procs]); // copy
-  }
+  if (maxProcs === 0) return false;
 
-  // Build the variant merge groups. For each variant:
-  //   - If the variant's arcUID has multiple processes pending, pick a unique one
-  //     (consuming from the per-arc list).
-  //   - If the arc has only one pending process and it's already consumed,
-  //     CLONE that process's state for use in this variant.
-  const variantGroups = []; // each: { mergeGroup, isCloned: arcUID → boolean }
-  // Tracking consumed processes per arc across variants
-  const consumed = new Map();
-  for (const uid of incomingArcs) consumed.set(uid, 0);
+  const variantGroups = [];
+  const consumedPerC = new Map();
+  for (const c of processesPerC.keys()) consumedPerC.set(c, 0);
 
-  for (const variantArcs of variants) {
+  for (let vIdx = 0; vIdx < maxProcs; vIdx++) {
     const mergeGroup = [];
-    const clonedProcs = new Map(); // arcUID → cloned proc (so we can clean up later)
+    const clonedProcs = new Map();
+    let valid = true;
 
-    for (const arcUID of variantArcs) {
-      const procs = processesPerArc.get(arcUID) ?? [];
-      const consumedCount = consumed.get(arcUID) ?? 0;
-
+    for (const [c, procs] of processesPerC.entries()) {
+      const consumedCount = consumedPerC.get(c);
       if (consumedCount < procs.length) {
-        // Use the next un-consumed process
         mergeGroup.push(procs[consumedCount]);
-        consumed.set(arcUID, consumedCount + 1);
+        consumedPerC.set(c, consumedCount + 1);
       } else {
-        // All processes for this arc consumed — must clone an existing one.
-        // Use the FIRST process (lowest ID) and clone its pre-merge state.
+        // Need to clone an existing process for this C-group.
+        // Pick the lowest-ID process (which carries the earliest, most-shared
+        // state) and clone it onto the appropriate arc.
         const original = procs[0];
-        if (!original) {
-          // Shouldn't happen given allArrived check, but safe
-          continue;
-        }
-        if (!idCounter) {
-          // No idCounter available — can't clone. Skip this variant.
-          mergeGroup.length = 0;
-          break;
-        }
+        if (!original) { valid = false; break; }
+        if (!idCounter) { valid = false; break; }
+
         const cloneState = structuredClone(original.states);
         const clone = {
           id: idCounter.nextId++,
           currentVertex: original.currentVertex,
           nextArcUID: original.nextArcUID,
           status: 'pending',
-          pendingArcUID: arcUID,
+          pendingArcUID: original.pendingArcUID,
           interruptedByRBS: original.interruptedByRBS ?? null,
           interruptedByProcessId: original.interruptedByProcessId ?? null,
           states: cloneState,
         };
         processes.push(clone);
         mergeGroup.push(clone);
-        clonedProcs.set(arcUID, clone);
+        clonedProcs.set(original.pendingArcUID, clone);
         console.log(
           `  Cloned Process ${original.id} → Process ${clone.id} ` +
-          `(shared arc ${arcUID} needed for OR-subgroup merge variant)`
+          `(C-group '${c}' needed for parallel merge variant ${vIdx + 1})`
         );
       }
     }
 
-    if (mergeGroup.length === variantArcs.length && mergeGroup.length > 0) {
+    if (valid && mergeGroup.length === processesPerC.size) {
       variantGroups.push({ mergeGroup, clonedProcs });
     }
   }
@@ -1422,29 +1400,38 @@ export function parallelActivityExtraction(source, sink, cache, simpleModel = nu
       console.log(`  → isUnconstrained: ${isUnconstrained}`);
 
       if (isUnconstrained) {
-        // Check if destination is a MIX join AND an ε-arc sibling is already
-        // pending there. If so, this Σ-arc process must wait too so both can
-        // resolve together (MIX-AND merge + MIX-OR clone).
-        // We check the destination's incoming arcs directly rather than using
-        // getJoinType(proc) — because getJoinType with the Σ process as askingProcess
-        // will always return MIX-AND-join (its own T already has the Σ arc checked).
+        // Check if destination is a MIX join. If so, the Σ-arc process must
+        // wait at the join so both the MIX-AND merge AND the MIX-OR clone
+        // can be produced. Per the manuscript:
+        //   - MIX-AND path: ε waits for Σ; both merge as one activity.
+        //   - MIX-OR path:  Σ goes through independently as its own activity.
+        // Both must be produced. The Σ process going through unconstrained
+        // before the ε partner arrives would skip the MIX-AND merge entirely.
+        //
+        // We mark the Σ process pending if any ε arc to the same join vertex
+        // is still reachable by some live process — i.e. the merge partner
+        // can still arrive. The `canStillArriveOnArc` helper handles the
+        // "in-flight" case (active processes upstream of the partner arc).
         const destIncoming = [...getIncomingArcs(arc.toVertexUID, cache.arcsMatrix)];
         const destIsMixJoin = destIncoming.length > 1 &&
           destIncoming.some(uid => isEpsilon(cache.arcMap[uid])) &&
           destIncoming.some(uid => !isEpsilon(cache.arcMap[uid]));
 
-        const epsArcPendingAtDest = destIsMixJoin &&
-          !isEpsilon(arc) &&   // this process is on a Σ arc
-          processes.some(
-            (p) =>
-              p.status === "pending" &&
-              p.pendingArcUID !== null &&
-              cache.arcMap[p.pendingArcUID]?.toVertexUID === arc.toVertexUID &&
-              isEpsilon(cache.arcMap[p.pendingArcUID])
+        let mustWaitForMixPartner = false;
+        if (destIsMixJoin && !isEpsilon(arc)) {
+          // Find ε incoming arcs (other than the one this process is taking)
+          const epsIncomingArcs = destIncoming.filter(uid =>
+            uid !== arcUID && isEpsilon(cache.arcMap[uid])
           );
+          // If any ε partner could still arrive at the join, this Σ process
+          // must wait so the MIX-AND merge can still happen.
+          mustWaitForMixPartner = epsIncomingArcs.some(uid =>
+            canStillArriveOnArc(uid, processes, cache)
+          );
+        }
 
-        if (epsArcPendingAtDest) {
-          // Σ arc process must also wait so both can resolve at MIX join
+        if (mustWaitForMixPartner) {
+          // Σ arc process must wait so both MIX-AND and MIX-OR can be produced
           markProcessPending(proc, arcUID);
           console.log(`  → Process ${proc.id} pending (Σ arc, waiting for MIX join resolution at ${arc.toVertexUID})`);
         } else {

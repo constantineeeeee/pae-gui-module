@@ -389,6 +389,120 @@ export default class TraversalTreeViewerManager {
       });
     });
 
+    // ── DEBUG: log all node positions after D3 layout ─────────────────────────
+    console.log("[TT DEBUG] Total allNodes:", res.allNodes.length, "D3 nodes:", nodes.length);
+    for (const n of res.allNodes) {
+      const pos = layoutPos.get(n.id);
+      const label = n.isPlaceholder ? `(${n.v})` : `${n.v} S(${JSON.stringify(n.S)})`;
+      console.log(`[TT NODE] id=${n.id} v=${n.v} placeholder=${!!n.isPlaceholder} ` +
+        `parents=[${(n.parents??[]).map(p=>p.id).join(",")}] ` +
+        `children=[${(n.children??[]).map(c=>c.id).join(",")}] ` +
+        `pos=${pos ? Math.round(pos.x)+","+Math.round(pos.y) : "MISSING"} ` +
+        `label="${label}"`);
+    }
+
+    // ── DEBUG: log allNodes from algorithm ───────────────────────────────────
+    console.log("[TT DEBUG] allNodes from algorithm:");
+    for (const n of res.allNodes) {
+      console.log(`  [ALG NODE] id=${n.id} v=${n.v} S=${JSON.stringify(n.S)} ` +
+        `triggerC=${n.triggerC} isPlaceholder=${!!n.isPlaceholder} ` +
+        `joinGroupId=${n.joinGroupId ?? "none"} ` +
+        `parents=[${(n.parents??[]).map(p=>p.id).join(",")}] ` +
+        `children=[${(n.children??[]).map(c=>c.id).join(",")}]`);
+    }
+
+    // ── Symmetrize MIX/OR placeholder groups ──────────────────────────────
+    // For each joinGroupId (MIX or OR placeholder set), pull placeholders
+    // toward the vertical midpoint of their parents and align their
+    // labeled output children symmetrically around that midpoint.
+    // This produces the "two horizontal lanes meeting at a sync bar" look.
+    //
+    // Done BEFORE the standard shiftSubtreeY centering so AND-merges still
+    // pull their merged labeled output between parents afterwards.
+    const shiftSubtreeYPre = (nodeId, dy) => {
+      const stack = [nodeId];
+      const seen = new Set();
+      while (stack.length) {
+        const id = stack.pop();
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const p = layoutPos.get(id);
+        if (p) layoutPos.set(id, { x: p.x, y: p.y + dy });
+        const node = res.allNodes.find(nn => nn.id === id);
+        if (!node) continue;
+        for (const c of node.children ?? []) stack.push(c.id);
+      }
+    };
+
+    {
+      const groupBuckets = new Map();
+      for (const n of res.allNodes) {
+        if (!n.isPlaceholder || !n.joinGroupId) continue;
+        if (!groupBuckets.has(n.joinGroupId)) groupBuckets.set(n.joinGroupId, []);
+        groupBuckets.get(n.joinGroupId).push(n);
+      }
+
+      for (const [, placeholders] of groupBuckets) {
+        if (placeholders.length < 2) continue;
+
+        // 1. Compute the midpoint y of all placeholders' parents
+        const parentYs = [];
+        for (const ph of placeholders) {
+          for (const p of ph.parents ?? []) {
+            const py = layoutPos.get(p.id)?.y;
+            if (typeof py === "number") parentYs.push(py);
+          }
+        }
+        if (parentYs.length < 2) continue;
+        const midY = parentYs.reduce((a, b) => a + b, 0) / parentYs.length;
+
+        // 2. Collect distinct labeled output nodes hanging off these placeholders
+        const outputNodes = new Set();
+        for (const ph of placeholders) {
+          for (const c of ph.children ?? []) outputNodes.add(c);
+        }
+        const outputs = [...outputNodes];
+
+        // 3. Symmetrically distribute placeholders around midY
+        //    (preserving their original ordering by current y)
+        placeholders.sort((a, b) => {
+          const ay = layoutPos.get(a.id)?.y ?? 0;
+          const by = layoutPos.get(b.id)?.y ?? 0;
+          return ay - by;
+        });
+        const phSpread = Math.max(80, Y_GAP * 0.6);
+        const N_ph = placeholders.length;
+        placeholders.forEach((ph, idx) => {
+          const targetY = midY + (idx - (N_ph - 1) / 2) * phSpread;
+          const cur = layoutPos.get(ph.id);
+          if (!cur) return;
+          const dy = targetY - cur.y;
+          if (Math.abs(dy) >= 1) {
+            // Move just the placeholder (children will be repositioned below)
+            layoutPos.set(ph.id, { x: cur.x, y: targetY });
+          }
+        });
+
+        // 4. Symmetrically distribute output nodes around midY
+        outputs.sort((a, b) => {
+          const ay = layoutPos.get(a.id)?.y ?? 0;
+          const by = layoutPos.get(b.id)?.y ?? 0;
+          return ay - by;
+        });
+        const outSpread = Math.max(80, Y_GAP * 0.6);
+        const N_out = outputs.length;
+        outputs.forEach((out, idx) => {
+          const targetY = midY + (idx - (N_out - 1) / 2) * outSpread;
+          const cur = layoutPos.get(out.id);
+          if (!cur) return;
+          const dy = targetY - cur.y;
+          if (Math.abs(dy) >= 1) {
+            shiftSubtreeYPre(out.id, dy);
+          }
+        });
+      }
+    }
+
     // Center AND-join nodes between their incoming parents
     const shiftSubtreeY = (nodeId, dy) => {
       const stack = [nodeId];
@@ -424,6 +538,67 @@ export default class TraversalTreeViewerManager {
       const dy = targetY - myPos.y;
       if (Math.abs(dy) < 1) continue;
       shiftSubtreeY(n.id, dy);
+    }
+
+    // ── Spread overlapping nodes (after AND-join centering) ─────────────────
+    // Run AFTER centering so that node positions are already in their final
+    // pre-render locations. Nodes at the same (x, y) get spread vertically.
+    // We use shiftSubtreeY to drag each node's children along with it so
+    // the whole sub-branch moves, not just the single node.
+    {
+      const MIN_SEP = Math.max(60, Y_GAP / 2);
+      let changed = true;
+      let iterations = 0;
+      while (changed && iterations++ < 20) {
+        changed = false;
+        // Bucket by x column, find nodes that are too close vertically
+        const byX = new Map();
+        for (const [id, p] of layoutPos) {
+          const col = Math.round(p.x);
+          if (!byX.has(col)) byX.set(col, []);
+          byX.get(col).push({ id, y: p.y });
+        }
+        for (const [, nodesInCol] of byX) {
+          nodesInCol.sort((a, b) => a.y - b.y);
+          for (let i = 1; i < nodesInCol.length; i++) {
+            const prev = nodesInCol[i - 1];
+            const curr = nodesInCol[i];
+            const gap = curr.y - prev.y;
+            if (gap < MIN_SEP) {
+              const needed = MIN_SEP - gap;
+              // Push current node and its subtree down by `needed`
+              shiftSubtreeY(curr.id, needed);
+              curr.y += needed; // update local snapshot for next comparison
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+
+    // ── DEBUG: log final positions after all adjustments ────────────────────
+    console.log("[TT DEBUG] Final layoutPos after adjustments:");
+    for (const [id, pos] of layoutPos) {
+      const n = res.allNodes.find(n => n.id === id);
+      const label = n ? (n.isPlaceholder ? `(${n.v})` : `${n.v} S(${JSON.stringify(n.S)})`) : "?";
+      console.log(`  [FINAL POS] id=${id} x=${Math.round(pos.x)} y=${Math.round(pos.y)} label="${label}"`);
+    }
+
+    // Check for overlapping positions
+    const posGroups = new Map();
+    for (const [id, pos] of layoutPos) {
+      const key = `${Math.round(pos.x)},${Math.round(pos.y)}`;
+      if (!posGroups.has(key)) posGroups.set(key, []);
+      posGroups.get(key).push(id);
+    }
+    for (const [key, ids] of posGroups) {
+      if (ids.length > 1) {
+        const labels = ids.map(id => {
+          const n = res.allNodes.find(n => n.id === id);
+          return n ? `${n.id}:${n.v}` : id;
+        });
+        console.warn(`[TT OVERLAP] Position ${key} has ${ids.length} nodes: ${labels.join(", ")}`);
+      }
     }
 
     // ── SVG layers ────────────────────────────────────────────────────────────

@@ -187,6 +187,7 @@ export function generateTraversalTreeFromJSON(
 
     for (let nodeX of X) {
       const outgoingEdges = out.get(nodeX.v) || [];
+      console.log(`[NTT FORWARD] nodeX=${nodeX.id} v=${nodeX.v} outgoingEdges count=${outgoingEdges.length}:`, outgoingEdges.map(e => `${e.from}->${e.to}(C=${e.C},L=${e.L})`).join(", "));
 
       for (let edge of outgoingEdges) {
         const yj = edge.to;
@@ -196,7 +197,12 @@ export function generateTraversalTreeFromJSON(
         const currentVisits = nodeX.edgeVisits[edgeKey] || 0;
         const maxVisits = edge.L !== undefined ? edge.L : 1;
 
-        if (currentVisits >= maxVisits) continue;
+        console.log(`[NTT EDGE] ${edgeKey}: isAncestor=${isAncestor} currentVisits=${currentVisits} maxVisits=${maxVisits}`);
+
+        if (currentVisits >= maxVisits) {
+          console.log(`  → SKIP: visits exhausted`);
+          continue;
+        }
 
         let newEdgeVisits = {
           ...nodeX.edgeVisits,
@@ -211,16 +217,19 @@ export function generateTraversalTreeFromJSON(
         }
 
         // --- STATE DEDUPLICATION CHECK ---
-        let sig = getStateSignature(yj, newEdgeVisits, nodeX.choices);
+        let sig = `${getStateSignature(yj, newEdgeVisits, nodeX.choices)}|p:${nodeX.id}`;
+        console.log(`  → sig=${sig}`);
         if (stateRegistry.has(sig)) {
           let existingNode = stateRegistry.get(sig);
+          console.log(`  → DEDUP HIT: existing node ${existingNode.id} reused`);
           if (!existingNode.parents.find(p => p.id === nodeX.id)) {
             existingNode.parents.push(nodeX);
             nodeX.children.push(existingNode);
           }
           progressedThisIteration = true;
-          continue; // Block duplicate branch creation
+          continue;
         }
+        console.log(`  → NEW NODE created for v=${yj}`);
 
         let cVal = edge.C === "" || edge.C === "ϵ" ? EPS : edge.C;
         let newS = [...nodeX.S, cVal];
@@ -409,7 +418,17 @@ export function generateTraversalTreeFromJSON(
                     tempVisits[edge] = Math.max(tempVisits[edge] || 0, count);
                   }
                 }
-                const sig = getStateSignature(joinV, tempVisits, mergedChoices);
+                // Include the sorted parent IDs in the signature so different
+                // ancestor combinations produce DISTINCT merged nodes.
+                // Without this, two different (a,b)-merges that happen to have
+                // overlapping edge-visit counts would dedupe into one node and
+                // their paths would visually overlap.
+                const parentSigPart = pair
+                  .map(p => p.id)
+                  .sort()
+                  .join(",");
+                const baseSig = getStateSignature(joinV, tempVisits, mergedChoices);
+                const sig = `${baseSig}|parents:${parentSigPart}`;
 
                 if (stateRegistry.has(sig)) {
                   let existingNode = stateRegistry.get(sig);
@@ -429,17 +448,30 @@ export function generateTraversalTreeFromJSON(
                 let nodeC = pair.find((n) => n.triggerC !== EPS);
 
                 if (nodeEps && nodeC) {
-                  // MIX-AND merged path: both arcs converge with state (ε, c)
-                  // Insert placeholders for both parents (sync bar at joinV)
-                  let mixAndChoices = { ...mergedChoices, [joinV]: "AND" };
-                  const phPair = insertJoinPlaceholders(pair, joinV);
-                  createMergedNode(phPair, joinV, [...basePrefix, `(${EPS},${nodeC.triggerC})`], mixAndChoices);
+                  // MIX joins produce TWO outputs sharing the SAME pair of
+                  // placeholders (one per parent), exactly like OR-joins do.
+                  // The two outputs differ in their merged state:
+                  //   • MIX-AND merged: both arcs converge → S(..., (ε, c))
+                  //   • MIX-OR independent: only Σ arc → S(..., c)
+                  // Both labeled outputs hang off the SAME (ε-parent → ph)
+                  // and (Σ-parent → ph) placeholders, sharing one sync bar.
 
-                  // MIX-OR independent path: only the Σ arc passes through.
-                  // Add a placeholder for the Σ parent only — same group id so
-                  // the sync bar visually associates the OR-leg with the join.
+                  // Create one placeholder per parent, sharing the joinV's group id
+                  const phPair = insertJoinPlaceholders(pair, joinV);
+                  const phEps  = phPair[pair.indexOf(nodeEps)];
+                  const phC    = phPair[pair.indexOf(nodeC)];
+
+                  // MIX-AND merged: both placeholders are parents of the merged node
+                  let mixAndChoices = { ...mergedChoices, [joinV]: "AND" };
+                  createMergedNode(
+                    [phEps, phC],
+                    joinV,
+                    [...basePrefix, `(${EPS},${nodeC.triggerC})`],
+                    mixAndChoices
+                  );
+
+                  // MIX-OR independent: only the Σ-arc placeholder is its parent
                   let mixOrChoices = { ...nodeC.choices, [joinV]: "OR" };
-                  const [phC] = insertJoinPlaceholders([nodeC], joinV);
                   createMergedNode([phC], joinV, [...nodeC.S], mixOrChoices);
                 }
               }
