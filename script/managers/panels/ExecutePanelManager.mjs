@@ -96,8 +96,8 @@ export default class ExecutePanelManager {
 
 
         aeSectionViews.isParallelCheckbox.addEventListener("change", () => {
-            const isParallel = aeSectionViews.isParallelCheckbox.checked;
-            aeSectionViews.simulateButton.disabled = isParallel;
+            // Simulate button stays enabled — when isParallel is checked,
+            // it runs PAE then opens parallel activity simulation directly.
         });
 
         aeSectionViews.generateButton.addEventListener("click", async () => {
@@ -130,14 +130,26 @@ export default class ExecutePanelManager {
                 if (paeManager.isDeadlock || !paeManager.isParallel) {
                     const entries        = paeManager.getProcessEntries();
                     const competitionLog = paeManager.competitionLog;
+                    const interruptionLog = paeManager.interruptionLog;
                     // Collect competing arc UIDs — same for all processes in the group
-                    const competingArcUIDs = [...paeManager.getCompetingArcUIDs()];
+                    const competingArcUIDs    = [...paeManager.getCompetingArcUIDs()];
+                    const interruptingArcUIDs = [...paeManager.getInterruptingArcUIDs()];
+
+                    // Highlight interruption arcs in orange (different from competition red)
+                    for (const arcUID of interruptingArcUIDs) {
+                        drawingView.highlightArc(arcUID, "orange");
+                    }
 
                     const arcDescriptions = competitionLog.map((e) => {
                         const [from, to] = paeManager.getArcIdentifierPair(e.arcUID);
                         return `(${from || "?"}→${to || "?"}) L=${e.arcL}, used by ${
                             (e.usedByProcessIds ?? [e.winnerProcessId, ...e.loserProcessIds]).length
                         } activities`;
+                    });
+
+                    const interruptionDescriptions = interruptionLog.map((e) => {
+                        return `RBS '${e.rbsCenter}': activities [${e.activityIds.join(", ")}] ` +
+                               `overlap at t=[${(e.overlapTimesteps ?? []).join(", ")}]`;
                     });
 
                     if (entries.length === 0) {
@@ -151,6 +163,7 @@ export default class ExecutePanelManager {
                             profile:          {},
                             tor:              {},
                             competingArcUIDs,
+                            interruptingArcUIDs,
                         }));
                     } else {
                         // One failed Activity per process so user can simulate each
@@ -163,9 +176,11 @@ export default class ExecutePanelManager {
                             const processConclusion = {
                                 pass:        false,
                                 title:       conclusion.title,
-                                description: competitionLog.length > 0
-                                    ? `Competing arcs:\n${arcDescriptions.map(d => "• " + d).join("\n")}`
-                                    : conclusion.description,
+                                description: interruptionLog.length > 0
+                                    ? `Interrupting activities:\n${interruptionDescriptions.map(d => "• " + d).join("\n")}`
+                                    : (competitionLog.length > 0
+                                        ? `Competing arcs:\n${arcDescriptions.map(d => "• " + d).join("\n")}`
+                                        : conclusion.description),
                             };
 
                             this.context.managers.activities.addActivity(new Activity({
@@ -177,7 +192,8 @@ export default class ExecutePanelManager {
                                 conclusion:       processConclusion,
                                 profile:          entry.activityProfile,
                                 tor:              {},
-                                competingArcUIDs, // highlighted red in simulation view
+                                competingArcUIDs,    // highlighted red in simulation view
+                                interruptingArcUIDs, // highlighted orange in simulation view
                             }));
                         });
                     }
@@ -212,12 +228,67 @@ export default class ExecutePanelManager {
         });
 
         aeSectionViews.simulateButton.addEventListener("click", async () => {
-            const { name, source, sink, mode, isTargeted } = this.#forms.activityExtraction.getValues();
-            if(!source || !sink || !mode) return;
+            const { name, source, sink, mode, isTargeted, isParallel } = this.#forms.activityExtraction.getValues();
+            if(!source || !sink) return;
+            if(!isParallel && !mode) return; // sequential mode requires mode
 
-            let targetedArcs = new Set();
             const visualModel = this.context.managers.visualModel.makeCopy();
-            
+
+            // ── PARALLEL SIMULATION PATH ─────────────────────────────────
+            // Run PAE, then open parallel activity simulation directly (no
+            // intermediate save-to-activities-list step).
+            if (isParallel) {
+                const paeManager = new PAESimulationManager(
+                    this.context,
+                    { name, source: Number(source), sink: Number(sink) },
+                    visualModel
+                );
+                await paeManager.ready;
+
+                const conclusion = paeManager.getConclusion();
+                const competingArcUIDs    = [...paeManager.getCompetingArcUIDs()];
+                const interruptingArcUIDs = [...paeManager.getInterruptingArcUIDs()];
+
+                const entries = paeManager.isParallel
+                    ? paeManager.getProcessEntriesForGroup(0)
+                    : paeManager.getProcessEntries();
+
+                if (entries.length === 0) {
+                    // No processes completed — show feedback and return
+                    this.context.managers.workspace.gotoMainModel();
+                    this.context.managers.workspace.showPanel("execute");
+                    alert(`PAE could not produce any activities.\n\n${conclusion.title}: ${conclusion.description}`);
+                    return;
+                }
+
+                // Build Activity objects in-memory (not added to the saved list)
+                const parallelGroupId = crypto.randomUUID();
+                const activities = entries.map((entry, idx) => new Activity({
+                    name: entries.length === 1
+                        ? (name?.trim() || "<Untitled PAE>")
+                        : `${name?.trim() || "<Untitled PAE>"} — Process ${idx + 1}`,
+                    source:  Number(source),
+                    sink:    Number(sink),
+                    origin:  "pae",
+                    parallelGroupId,
+                    conclusion,
+                    profile: entry.activityProfile,
+                    tor:     {},
+                    competingArcUIDs,
+                    interruptingArcUIDs,
+                }));
+
+                // Open parallel simulation directly
+                if (activities.length > 1) {
+                    this.context.managers.workspace.startParallelActivitySimulation(activities);
+                } else {
+                    this.context.managers.workspace.startActivitySimulation(activities[0]);
+                }
+                return;
+            }
+
+            // ── SEQUENTIAL AES PATH (unchanged) ──────────────────────────
+            let targetedArcs = new Set();
             if(isTargeted) {
                 targetedArcs = await this.context.managers.workspace.startTargetedArcSelection(visualModel);
             }
@@ -271,7 +342,7 @@ export default class ExecutePanelManager {
             this.#views.activityExtraction.root.setAttribute("data-value-ismaximal", event.target.checked));
         this.#forms.activityExtraction.getFieldElement('isParallel').addEventListener("change", (event) => {
             this.#views.activityExtraction.root.setAttribute("data-value-isparallel", event.target.checked);
-            this.#views.activityExtraction.simulateButton.disabled = event.target.checked;
+            // Simulate button stays enabled — runs PAE then opens parallel simulation.
         });
  
         this.#forms.vertexSimplification = new Form(this.#views.vertexSimplification.root)

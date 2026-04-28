@@ -208,6 +208,23 @@ export class PAESimulationManager {
         }
 
         const log = this.competitionLog;
+        const intLog = this.interruptionLog;
+
+        // Interruption case (reset-safeness violation)
+        if (intLog.length > 0 && !this.isParallel) {
+            const intDescriptions = intLog.map((entry) => entry.reason);
+            return {
+                pass:  false,
+                title: "Activities found but are not parallel — process interruption detected",
+                description:
+                    `${this.groupCount} group(s) of activities were extracted, but ` +
+                    `${intLog.length} pair(s) of activities interrupt each other inside an RBS, ` +
+                    "preventing parallelism. Process interruption occurs when two activities " +
+                    "both traverse the same RBS at overlapping timesteps but do not exit via " +
+                    "the out-bridge at the same timestep. Arcs highlighted in red below:\n" +
+                    intDescriptions.map((d) => `• ${d}`).join("\n"),
+            };
+        }
 
         if (log.length > 0 && !this.isParallel) {
             // Build a human-readable list of competing arcs
@@ -268,6 +285,15 @@ export class PAESimulationManager {
     }
 
     /**
+     * Returns the interruption log from the PAE result.
+     * Each entry describes one pair of activities that interrupt each other
+     * by violating reset-safeness inside an RBS.
+     */
+    get interruptionLog() {
+        return this.#result?.interruptionLog ?? [];
+    }
+
+    /**
      * Returns the set of arc UIDs that triggered competition (to be
      * coloured red in the drawing view).
      *
@@ -277,6 +303,20 @@ export class PAESimulationManager {
         const arcs = new Set();
         for (const entry of this.competitionLog) {
             arcs.add(entry.arcUID);
+        }
+        return arcs;
+    }
+
+    /**
+     * Returns the set of arc UIDs that triggered process interruption.
+     * @returns {Set<number>}
+     */
+    getInterruptingArcUIDs() {
+        const arcs = new Set();
+        for (const entry of this.interruptionLog) {
+            for (const arcUID of entry.violatingArcUIDs ?? []) {
+                arcs.add(arcUID);
+            }
         }
         return arcs;
     }

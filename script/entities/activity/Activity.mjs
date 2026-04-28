@@ -52,6 +52,12 @@ export default class Activity {
     /** @type {number[]} — arc UIDs that caused competition (PAE only) */
     competingArcUIDs;
 
+    /** @type {number[]} — arc UIDs that caused process interruption (PAE only) */
+    interruptingArcUIDs;
+
+    /** @type {number[]} — process IDs of activities this one interrupts/is interrupted by */
+    interruptingActivityIds;
+
     /**
      * @param {{ 
      *     id: string, 
@@ -76,5 +82,7 @@ export default class Activity {
         this.tor = values.tor;
         this.parallelGroupId = values.parallelGroupId || null;
         this.competingArcUIDs = values.competingArcUIDs || [];
+        this.interruptingArcUIDs    = values.interruptingArcUIDs    ?? [];
+        this.interruptingActivityIds= values.interruptingActivityIds ?? [];
     }
 }

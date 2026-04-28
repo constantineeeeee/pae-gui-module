@@ -25,6 +25,7 @@ import {
   isArcPreviouslyChecked,
 } from "./aes.mjs";
 import { checkCompetingProcesses } from "./impedance-freeness.mjs";
+import { checkInterruptingActivities } from "./reset-safeness.mjs";
 import { Cycle } from "./soundness/utils/cycle.mjs";
 
 // =============================================================================
@@ -1004,6 +1005,8 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
 
   const parallelActivitySets = [];
   const impededResults = []; // post-hoc impeded processes (competition detected after traversal)
+  /** @type {object[]} interruptions detected post-hoc by reset-safeness check */
+  const interruptionLog = [];
 
   for (const group of groups.values()) {
     if (group.length < 2) continue;
@@ -1012,6 +1015,32 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
     const { hasCompetition, competingActivityIds, competitionLog: ifCompetitionLog } = simpleModel
       ? checkCompetingProcesses(group, simpleModel)
       : { hasCompetition: false, competingActivityIds: [], competitionLog: [] };
+
+    // Check for interrupting activities (reset-safeness violations)
+    const {
+      hasInterruption,
+      interruptingActivityIds,
+      interruptionLog: rsInterruptionLog,
+      violatingArcUIDs: rsViolatingArcUIDs,
+    } = simpleModel
+      ? checkInterruptingActivities(group, simpleModel)
+      : { hasInterruption: false, interruptingActivityIds: [], interruptionLog: [], violatingArcUIDs: [] };
+
+    if (hasInterruption) {
+      console.log(`  Interruption detected among processes:`, interruptingActivityIds);
+      for (const entry of (rsInterruptionLog ?? [])) {
+        // Mark each pair of activities as interrupting (mutual relationship)
+        interruptionLog.push({
+          rbsCenter:        entry.rbsCenter,
+          activityIds:      entry.activityIds,
+          overlapTimesteps: entry.overlapTimesteps,
+          aExitTimestep:    entry.aExitTimestep,
+          bExitTimestep:    entry.bExitTimestep,
+          violatingArcUIDs: entry.violatingArcUIDs,
+          reason:           entry.reason,
+        });
+      }
+    }
 
     if (hasCompetition) {
       console.log(`  Competition detected among processes:`, competingActivityIds);
@@ -1089,7 +1118,15 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
     (entry.loserProcessIds ?? []).some(id => doneProcessIds.has(id))
   );
   const noCompetition = !competitionAffectsDone;
-  const isParallel = parallelActivitySets.length > 0 && noCompetition;
+
+  // Interruption (reset-safeness violation) — any pair of DONE processes
+  // that interrupt each other disqualifies parallelism.
+  const interruptionAffectsDone = interruptionLog.some(entry =>
+    (entry.activityIds ?? []).some(id => doneProcessIds.has(id))
+  );
+  const noInterruption = !interruptionAffectsDone;
+
+  const isParallel = parallelActivitySets.length > 0 && noCompetition && noInterruption;
 
   // Include winner done processes, post-hoc impeded processes (truncated profiles),
   // and traversal-time locked processes (eRU exhausted during traversal).
@@ -1122,6 +1159,7 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
     allProcessResults,
     isParallel,
     competitionLog,
+    interruptionLog,
   };
 }
 

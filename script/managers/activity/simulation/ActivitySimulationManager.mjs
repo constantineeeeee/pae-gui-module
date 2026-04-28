@@ -52,6 +52,7 @@ export class ActivitySimulationManager {
 
     /** @type {number[]} — arc UIDs to permanently highlight red (competing arcs) */
     #competingArcUIDs = [];
+    #interruptingArcUIDs = [];
 
     /** 
      * @type {{
@@ -89,6 +90,11 @@ export class ActivitySimulationManager {
         this.#competingArcUIDs = this.#activities
             .flatMap(a => a.competingArcUIDs ?? [])
             .filter((uid, i, arr) => arr.indexOf(uid) === i); // deduplicate
+
+        // Collect interrupting arc UIDs (reset-safeness violations)
+        this.#interruptingArcUIDs = this.#activities
+            .flatMap(a => a.interruptingArcUIDs ?? [])
+            .filter((uid, i, arr) => arr.indexOf(uid) === i);
 
         this.#initialize();
     }
@@ -169,6 +175,7 @@ export class ActivitySimulationManager {
 
                     // Track whether any arc in this timestep is a competing arc
                     let hasCompetingArc = false;
+                    let hasInterruptingArc = false;
 
                     for (const arcUID of activity.profile[t]) {
                         const [from, to] = this.getArcIdentifierPair(arcUID);
@@ -180,6 +187,9 @@ export class ActivitySimulationManager {
                         if (this.#competingArcUIDs.includes(arcUID)) {
                             tag.style.cssText = "background:#ffe5e5;color:#c0392b;border:1px solid #e74c3c;border-radius:4px;";
                             hasCompetingArc = true;
+                        } else if (this.#interruptingArcUIDs.includes(arcUID)) {
+                            tag.style.cssText = "background:#fdf1d9;color:#9c5a00;border:1px solid #f39c12;border-radius:4px;";
+                            hasInterruptingArc = true;
                         }
 
                         tdArcs.appendChild(tag);
@@ -195,6 +205,18 @@ export class ActivitySimulationManager {
                         badge.style.color = "#e74c3c";
                         badge.style.fontWeight = "bold";
                         tdTime.appendChild(badge);
+                    }
+
+                    // Mark the whole row orange if it contains an interrupting arc
+                    if (hasInterruptingArc && !hasCompetingArc) {
+                        tr.style.background = "#fdf3e2";
+                        const badge = document.createElement("span");
+                        badge.textContent = " ⚡";
+                        badge.title = "Interrupting arc — activity violates reset-safeness";
+                        badge.style.color = "#f39c12";
+                        badge.style.fontWeight = "bold";
+                        const firstCell = tr.querySelector("td");
+                        if (firstCell) firstCell.appendChild(badge);
                     }
 
                     tr.appendChild(tdTime);
@@ -286,6 +308,10 @@ export class ActivitySimulationManager {
         for (const arcUID of this.#competingArcUIDs) {
             this.#drawingManager.highlightArc(arcUID, "#e74c3c");
         }
+        // Always re-apply orange highlight for interrupting arcs (reset-safeness violations)
+        for (const arcUID of this.#interruptingArcUIDs) {
+            this.#drawingManager.highlightArc(arcUID, "#f39c12");
+        }
 
         if (this.#isParallel) {
             const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
@@ -328,6 +354,10 @@ export class ActivitySimulationManager {
         // Re-apply red for competing arcs before showing process-specific highlight
         for (const arcUID of this.#competingArcUIDs) {
             this.#drawingManager.highlightArc(arcUID, "#e74c3c");
+        }
+        // Re-apply orange for interrupting arcs (reset-safeness violations)
+        for (const arcUID of this.#interruptingArcUIDs) {
+            this.#drawingManager.highlightArc(arcUID, "#f39c12");
         }
 
         const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
