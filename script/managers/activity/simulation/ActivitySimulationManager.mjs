@@ -148,10 +148,23 @@ export class ActivitySimulationManager {
             this.#activities.forEach((activity, i) => {
                 const color = colors[i % colors.length];
 
-                // Colored label per process
-                const label = document.createElement("div");
-                label.style.cssText = `font-weight:500;font-size:13px;padding:8px 0 4px 8px;border-left:3px solid ${color};margin-bottom:4px;margin-top:${i > 0 ? "16px" : "0"}`;
+                // Process label row: colored title + "Highlight All" toggle button
+                const labelRow = document.createElement("div");
+                labelRow.style.cssText = `display:flex;align-items:center;justify-content:space-between;padding:6px 4px 4px 8px;border-left:3px solid ${color};margin-bottom:4px;margin-top:${i > 0 ? "16px" : "0"};`;
+
+                const label = document.createElement("span");
+                label.style.cssText = `font-weight:500;font-size:13px;`;
                 label.textContent = `Process ${i + 1}`;
+
+                const highlightBtn = document.createElement("button");
+                highlightBtn.textContent = "Highlight All";
+                highlightBtn.title = `Highlight all arcs used by Process ${i + 1}`;
+                highlightBtn.style.cssText = `font-size:11px;padding:3px 8px;min-height:24px;border-color:${color};color:${color};`;
+                highlightBtn.dataset.processHighlightBtn = String(i);
+                highlightBtn.addEventListener("click", () => this.highlightAllArcsForProcess(i));
+
+                labelRow.appendChild(label);
+                labelRow.appendChild(highlightBtn);
 
                 // Table
                 const table = document.createElement("table");
@@ -225,10 +238,10 @@ export class ActivitySimulationManager {
                     rowsByTimestep[t] = tr;
                 }
 
-                profilePanelMain.appendChild(label);
+                profilePanelMain.appendChild(labelRow);
                 profilePanelMain.appendChild(table);
 
-                this.#parallelPanels.push({ rowsByTimestep, color });
+                this.#parallelPanels.push({ rowsByTimestep, color, highlightBtn });
             });
 
         } else {
@@ -314,6 +327,7 @@ export class ActivitySimulationManager {
         }
 
         if (this.#isParallel) {
+            this.#resetHighlightButtons();
             const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
             this.#activities.forEach((activity, i) => {
                 const color = colors[i % colors.length];
@@ -348,6 +362,7 @@ export class ActivitySimulationManager {
      */
     setCurrentTimestepForProcess(processIndex, timestep) {
         this.#states.currentTimestep = timestep;
+        this.#resetHighlightButtons();
 
         this.#drawingManager.clearHighlights();
 
@@ -380,6 +395,60 @@ export class ActivitySimulationManager {
         if (panel) {
             panel.rowsByTimestep[timestep]?.classList.add("active");
         }
+    }
+
+    /**
+     * Highlights ALL arcs used by the given process across every timestep,
+     * using that process's assigned color. Competing/interrupting arc highlights
+     * are re-applied on top. All active row indicators are cleared so the user
+     * can see that no single timestep is selected.
+     * The "Highlight All" button for this process becomes disabled;
+     * all other processes' buttons are re-enabled.
+     *
+     * @param {number} processIndex - 0-based index of the process
+     */
+    highlightAllArcsForProcess(processIndex) {
+        this.#drawingManager.clearHighlights();
+
+        // Re-apply persistent highlights for competing / interrupting arcs
+        for (const arcUID of this.#competingArcUIDs) {
+            this.#drawingManager.highlightArc(arcUID, "#e74c3c");
+        }
+        for (const arcUID of this.#interruptingArcUIDs) {
+            this.#drawingManager.highlightArc(arcUID, "#f39c12");
+        }
+
+        const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
+
+        // Clear active rows and update button states across all process panels
+        this.#parallelPanels.forEach((panel, idx) => {
+            Object.values(panel.rowsByTimestep).forEach(r => r.classList.remove("active"));
+            if (panel.highlightBtn) {
+                panel.highlightBtn.disabled = (idx === processIndex);
+                panel.highlightBtn.style.opacity = (idx === processIndex) ? "0.4" : "";
+            }
+        });
+
+        // Collect every unique arc UID used by this process across all timesteps
+        const activity = this.#activities[processIndex];
+        const color = colors[processIndex % colors.length];
+        const allArcUIDs = new Set();
+        for (const arcs of Object.values(activity.profile)) {
+            for (const arcUID of arcs) allArcUIDs.add(arcUID);
+        }
+        for (const arcUID of allArcUIDs) {
+            this.#drawingManager.highlightArc(arcUID, color);
+        }
+    }
+
+    /** Re-enables all "Highlight All" buttons (called when navigating by row or timestep). */
+    #resetHighlightButtons() {
+        this.#parallelPanels.forEach(panel => {
+            if (panel.highlightBtn) {
+                panel.highlightBtn.disabled = false;
+                panel.highlightBtn.style.opacity = "";
+            }
+        });
     }
 
     /** @returns {string} */

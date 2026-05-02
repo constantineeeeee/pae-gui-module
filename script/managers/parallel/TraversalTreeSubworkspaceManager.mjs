@@ -411,11 +411,23 @@ export default class TraversalTreeViewerManager {
         `children=[${(n.children??[]).map(c=>c.id).join(",")}]`);
     }
 
-    // ── Symmetrize MIX/OR placeholder groups ──────────────────────────────
-    // For each joinGroupId (MIX or OR placeholder set), pull placeholders
-    // toward the vertical midpoint of their parents and align their
-    // labeled output children symmetrically around that midpoint.
-    // This produces the "two horizontal lanes meeting at a sync bar" look.
+    // ── Adjust MIX/OR placeholder groups ──────────────────────────────────
+    // Two distinct cases driven by the join type of the placeholders' vertex:
+    //
+    //   • OR-join: all placeholders converge to a SINGLE merged output. We
+    //     symmetrize placeholders + the lone output around the midpoint of
+    //     their parents — this produces the "two lanes meeting at a sync
+    //     bar" look that matches Structure 6 in the manuscript.
+    //
+    //   • MIX-join: placeholders feed into TWO outputs (MIX-AND merged with
+    //     label "(ε,σ)" and MIX-OR independent with label "σ"). Per
+    //     Structure 9 in the manuscript, the MIX-OR output must stay on the
+    //     Σ-parent's branch (it represents the Σ-arc firing without waiting
+    //     for ε), so we DO NOT pull placeholders to the midpoint. Instead,
+    //     each placeholder stays aligned with its parent's Y, the MIX-AND
+    //     merged output is placed on the ε-parent's lane (with the Σ-side
+    //     placeholder reaching up via a diagonal arrow), and the MIX-OR
+    //     output stays aligned with its single (Σ) parent.
     //
     // Done BEFORE the standard shiftSubtreeY centering so AND-merges still
     // pull their merged labeled output between parents afterwards.
@@ -445,61 +457,134 @@ export default class TraversalTreeViewerManager {
       for (const [, placeholders] of groupBuckets) {
         if (placeholders.length < 2) continue;
 
-        // 1. Compute the midpoint y of all placeholders' parents
-        const parentYs = [];
-        for (const ph of placeholders) {
-          for (const p of ph.parents ?? []) {
-            const py = layoutPos.get(p.id)?.y;
-            if (typeof py === "number") parentYs.push(py);
-          }
-        }
-        if (parentYs.length < 2) continue;
-        const midY = parentYs.reduce((a, b) => a + b, 0) / parentYs.length;
+        // Determine the join type for this placeholder group. All placeholders
+        // in a group share the same vertex v (the join vertex), so it suffices
+        // to query the joinTypes map with the first placeholder's v.
+        const joinV = placeholders[0].v;
+        const joinType = res.joinTypes?.get?.(joinV) ?? null;
 
-        // 2. Collect distinct labeled output nodes hanging off these placeholders
+        // Collect distinct labeled output nodes hanging off these placeholders
         const outputNodes = new Set();
         for (const ph of placeholders) {
           for (const c of ph.children ?? []) outputNodes.add(c);
         }
         const outputs = [...outputNodes];
 
-        // 3. Symmetrically distribute placeholders around midY
-        //    (preserving their original ordering by current y)
-        placeholders.sort((a, b) => {
-          const ay = layoutPos.get(a.id)?.y ?? 0;
-          const by = layoutPos.get(b.id)?.y ?? 0;
-          return ay - by;
-        });
-        const phSpread = Math.max(80, Y_GAP * 0.6);
-        const N_ph = placeholders.length;
-        placeholders.forEach((ph, idx) => {
-          const targetY = midY + (idx - (N_ph - 1) / 2) * phSpread;
-          const cur = layoutPos.get(ph.id);
-          if (!cur) return;
-          const dy = targetY - cur.y;
-          if (Math.abs(dy) >= 1) {
-            // Move just the placeholder (children will be repositioned below)
-            layoutPos.set(ph.id, { x: cur.x, y: targetY });
-          }
-        });
+        if (joinType === "MIX") {
+          // ── MIX-join branch ────────────────────────────────────────────
+          // Keep each placeholder aligned with its parent's Y (no pull to
+          // midpoint). Then position the labeled outputs:
+          //   • The MIX-AND merged output (parents.length >= 2, label
+          //     "(ε,σ)") aligns with the ε-parent's branch — matching the
+          //     manuscript's Structure 9 illustration where the merged
+          //     node sits on the ε-arc lane and the Σ-arc placeholder
+          //     reaches up via a diagonal arrow.
+          //   • The MIX-OR independent output (parents.length == 1, label
+          //     "σ") stays aligned with its single placeholder parent's Y —
+          //     this is the Σ-arc branch since MIX-OR represents the Σ-arc
+          //     firing without waiting for ε.
+          //
+          // The ε-parent placeholder is identified by walking up to its
+          // grandparent (the actual upstream tree node) and inspecting
+          // triggerC — placeholders themselves carry triggerC=null.
+          const isEpsPlaceholder = (ph) => {
+            const upstream = ph.parents?.[0];
+            return upstream?.triggerC === "ϵ";
+          };
 
-        // 4. Symmetrically distribute output nodes around midY
-        outputs.sort((a, b) => {
-          const ay = layoutPos.get(a.id)?.y ?? 0;
-          const by = layoutPos.get(b.id)?.y ?? 0;
-          return ay - by;
-        });
-        const outSpread = Math.max(80, Y_GAP * 0.6);
-        const N_out = outputs.length;
-        outputs.forEach((out, idx) => {
-          const targetY = midY + (idx - (N_out - 1) / 2) * outSpread;
-          const cur = layoutPos.get(out.id);
-          if (!cur) return;
-          const dy = targetY - cur.y;
-          if (Math.abs(dy) >= 1) {
-            shiftSubtreeYPre(out.id, dy);
+          for (const ph of placeholders) {
+            const parent = ph.parents?.[0];
+            if (!parent) continue;
+            const parentPos = layoutPos.get(parent.id);
+            const phPos = layoutPos.get(ph.id);
+            if (!parentPos || !phPos) continue;
+            // Snap placeholder to parent's Y (preserve x assigned by D3)
+            if (Math.abs(parentPos.y - phPos.y) >= 1) {
+              layoutPos.set(ph.id, { x: phPos.x, y: parentPos.y });
+            }
           }
-        });
+
+          // Identify the ε-parent placeholder for this MIX group (used to
+          // align the MIX-AND merged output's branch).
+          const epsPh = placeholders.find(isEpsPlaceholder) ?? placeholders[0];
+          const epsPhY = layoutPos.get(epsPh.id)?.y;
+
+          for (const out of outputs) {
+            const outPos = layoutPos.get(out.id);
+            if (!outPos) continue;
+            const parents = out.parents ?? [];
+            if (parents.length === 0) continue;
+
+            let targetY;
+            if (parents.length === 1) {
+              // MIX-OR independent: align with its lone (Σ) parent
+              const pp = layoutPos.get(parents[0].id);
+              if (!pp) continue;
+              targetY = pp.y;
+            } else {
+              // MIX-AND merged: align with the ε-parent's branch so the
+              // merged node sits on the ε-lane and the Σ-placeholder feeds
+              // it via a diagonal edge (matches Structure 9 illustration).
+              if (typeof epsPhY !== "number") continue;
+              targetY = epsPhY;
+            }
+
+            const dy = targetY - outPos.y;
+            if (Math.abs(dy) >= 1) {
+              shiftSubtreeYPre(out.id, dy);
+            }
+          }
+        } else {
+          // ── OR-join branch (default symmetrization) ────────────────────
+          // Compute the midpoint y of all placeholders' parents
+          const parentYs = [];
+          for (const ph of placeholders) {
+            for (const p of ph.parents ?? []) {
+              const py = layoutPos.get(p.id)?.y;
+              if (typeof py === "number") parentYs.push(py);
+            }
+          }
+          if (parentYs.length < 2) continue;
+          const midY = parentYs.reduce((a, b) => a + b, 0) / parentYs.length;
+
+          // Symmetrically distribute placeholders around midY
+          // (preserving their original ordering by current y)
+          placeholders.sort((a, b) => {
+            const ay = layoutPos.get(a.id)?.y ?? 0;
+            const by = layoutPos.get(b.id)?.y ?? 0;
+            return ay - by;
+          });
+          const phSpread = Math.max(80, Y_GAP * 0.6);
+          const N_ph = placeholders.length;
+          placeholders.forEach((ph, idx) => {
+            const targetY = midY + (idx - (N_ph - 1) / 2) * phSpread;
+            const cur = layoutPos.get(ph.id);
+            if (!cur) return;
+            const dy = targetY - cur.y;
+            if (Math.abs(dy) >= 1) {
+              // Move just the placeholder (children will be repositioned below)
+              layoutPos.set(ph.id, { x: cur.x, y: targetY });
+            }
+          });
+
+          // Symmetrically distribute output nodes around midY
+          outputs.sort((a, b) => {
+            const ay = layoutPos.get(a.id)?.y ?? 0;
+            const by = layoutPos.get(b.id)?.y ?? 0;
+            return ay - by;
+          });
+          const outSpread = Math.max(80, Y_GAP * 0.6);
+          const N_out = outputs.length;
+          outputs.forEach((out, idx) => {
+            const targetY = midY + (idx - (N_out - 1) / 2) * outSpread;
+            const cur = layoutPos.get(out.id);
+            if (!cur) return;
+            const dy = targetY - cur.y;
+            if (Math.abs(dy) >= 1) {
+              shiftSubtreeYPre(out.id, dy);
+            }
+          });
+        }
       }
     }
 
