@@ -692,8 +692,13 @@ export function resolveCompetition(processes, arcUID, cache, competitionLog) {
   const arc = arcMap[arcUID];
   const committed = getTotalArcTraversals(processes, arcUID);
 
-  // Sort by process ID — lowest wins
-  competitors.sort((a, b) => a.id - b.id);
+  // Nondeterministic selection: shuffle competitors so the winner is not
+  // determined by process ID. In the formal model, when multiple processes
+  // arrive at the same time, any subset of size ≤ remaining may proceed.
+  for (let i = competitors.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [competitors[i], competitors[j]] = [competitors[j], competitors[i]];
+  }
 
   // How many more traversals are available?
   const remaining = Math.max(0, arc.L - committed);
@@ -704,7 +709,7 @@ export function resolveCompetition(processes, arcUID, cache, competitionLog) {
     lockProcess(loser);
     console.log(
       `  Competition on arc ${arcUID} (L=${arc.L}, committed=${committed}): ` +
-      `Process ${loser.id} LOCKED (winner: Process ${winners[0]?.id})`,
+      `Process ${loser.id} LOCKED (winner(s): ${winners.map(w => `Process ${w.id}`).join(", ")})`,
     );
   }
 
@@ -712,13 +717,15 @@ export function resolveCompetition(processes, arcUID, cache, competitionLog) {
     competitionLog.push({
       arcUID,
       winnerProcessId:  winners[0]?.id ?? null,
+      winnerProcessIds: winners.map(w => w.id),
       loserProcessIds:  losers.map((p) => p.id),
       totalTraversals:  committed,
       arcL:             arc.L,
       reason:
         `Arc (uid=${arcUID}) has L=${arc.L} but ${competitors.length} processes ` +
         `simultaneously attempted it (${committed} already committed). ` +
-        `Process ${winners[0]?.id} wins; processes ${losers.map((p) => p.id).join(", ")} locked.`,
+        `Process(es) ${winners.map(w => w.id).join(", ")} win; ` +
+        `process(es) ${losers.map((p) => p.id).join(", ")} locked.`,
     });
   }
 
@@ -1096,16 +1103,17 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
     if (hasCompetition) {
       console.log(`  Competition detected among processes:`, competingActivityIds);
 
-      // For each competing arc, determine winner (lowest process ID) and losers.
-      // The winner keeps its full profile; losers get their profile truncated to
+      // For each competing arc, the first L processes are winners; the rest
+      // are losers. Winners keep their full profiles; losers get truncated to
       // the timestep of the competing arc so the UI shows where they were impeded.
       for (const ifEntry of (ifCompetitionLog ?? [])) {
         const alreadyLogged = competitionLog.some(e => e.arcUID === ifEntry.arcUID);
         if (!alreadyLogged) {
           competitionLog.push({
             arcUID:           ifEntry.arcUID,
-            winnerProcessId:  ifEntry.usedByProcessIds?.[0] ?? null,
-            loserProcessIds:  ifEntry.usedByProcessIds?.slice(1) ?? [],
+            winnerProcessId:  ifEntry.winnerProcessId ?? ifEntry.usedByProcessIds?.[0] ?? null,
+            winnerProcessIds: ifEntry.winnerProcessIds ?? ifEntry.usedByProcessIds?.slice(0, ifEntry.arcL ?? 1) ?? [],
+            loserProcessIds:  ifEntry.loserProcessIds ?? [],
             usedByProcessIds: ifEntry.usedByProcessIds ?? [],
             totalTraversals:  ifEntry.usedByProcessIds?.length ?? 0,
             arcL:             ifEntry.arcL,
@@ -1115,7 +1123,7 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
 
         // Truncate loser profiles: keep only timesteps up to (and including)
         // the timestep where the competing arc appears, then stop.
-        const loserIds = new Set(ifEntry.usedByProcessIds?.slice(1) ?? []);
+        const loserIds = new Set(ifEntry.loserProcessIds ?? []);
         for (const entry of group) {
           if (!loserIds.has(entry.processId)) continue;
 
@@ -1142,10 +1150,10 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
         }
       }
 
-      // Winner processes (lowest ID per competing arc) proceed normally.
+      // Winner processes (first L per competing arc) proceed normally.
       // Loser processes are moved out of the done group into impededResults.
       const allLoserIds = new Set(
-        (ifCompetitionLog ?? []).flatMap(e => e.usedByProcessIds?.slice(1) ?? [])
+        (ifCompetitionLog ?? []).flatMap(e => e.loserProcessIds ?? [])
       );
       const winnerGroup  = group.filter(a => !allLoserIds.has(a.processId));
       const loserEntries = group.filter(a =>  allLoserIds.has(a.processId));
@@ -1243,22 +1251,11 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
   parallelActivitySets.length = 0;
   filteredParallelSets.forEach(s => parallelActivitySets.push(s));
 
-  // Competition only disqualifies parallelism if it affects the done processes
-  // themselves. Intermediate lockouts from loop exploration are expected.
-  const doneProcessIds = new Set(doneProcesses.map(p => p.id));
-  const competitionAffectsDone = competitionLog.some(entry =>
-    (entry.loserProcessIds ?? []).some(id => {
-      const inParallelSet = parallelActivitySets.some(set =>
-        set.some(a => a.processId === id)
-      );
-      return inParallelSet;
-    })
-  );
-  const noCompetition = !competitionAffectsDone;
-  const noInterruption = interruptionLog.every(e =>
-    !parallelActivitySets.some(set => set.some(a => a.processId === (e.activityIds?.[0])))
-  );
-  const isParallel = parallelActivitySets.length > 0 && noCompetition && noInterruption;
+  // Parallelism holds as long as at least one clean parallel set of 2+
+  // activities survived after removing competition losers and PI-interrupted
+  // processes. Impeded processes are reported separately in the UI but do NOT
+  // prevent the remaining clean activities from being reported as parallel.
+  const isParallel = parallelActivitySets.length > 0;
 
   // Include winner done processes, post-hoc impeded processes (truncated profiles),
   // and traversal-time locked processes (eRU exhausted during traversal).
@@ -1603,6 +1600,7 @@ export function parallelActivityExtraction(source, sink, cache, simpleModel = nu
         competitionLog.push({
           arcUID,
           winnerProcessId:  priorUsers[0]?.id ?? null,
+          winnerProcessIds: priorUsers.map(p => p.id),
           loserProcessIds:  [proc.id],
           usedByProcessIds: [...priorUsers.map(p => p.id), proc.id],
           totalTraversals:  usedByOthers,
@@ -1616,7 +1614,7 @@ export function parallelActivityExtraction(source, sink, cache, simpleModel = nu
       }
 
       // ── Simultaneous competition check ────────────────────────────────────
-      // Multiple processes at the same vertex simultaneously — lowest ID wins.
+      // Multiple processes at the same vertex simultaneously — nondeterministic.
       resolveCompetition(processes, arcUID, cache, competitionLog);
 
       // If this process was just locked by competition resolution, skip it

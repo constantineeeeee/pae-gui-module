@@ -3,6 +3,7 @@ import { buildElement, Form } from "../../utils.mjs";
 import { ActivitiesManager } from "../activity/ActivitiesManager.mjs";
 import ModelContext from "../model/ModelContext.mjs";
 import { PAESimulationManager } from "../activity/extraction/PAESimulationManager.mjs";
+import TraversalTreeViewerManager from "../parallel/TraversalTreeSubworkspaceManager.mjs";
 
 export default class ExecutePanelManager {
     /** @type { ModelContext } */
@@ -177,7 +178,8 @@ export default class ExecutePanelManager {
                                 pass:        false,
                                 title:       conclusion.title,
                                 description: interruptionLog.length > 0
-                                    ? `Interrupting activities:\n${interruptionDescriptions.map(d => "• " + d).join("\n")}`
+                                    // ? `Interrupting activities:\n${interruptionDescriptions.map(d => "• " + d).join("\n")}`
+                                    ? ``
                                     : (competitionLog.length > 0
                                         ? `Competing arcs:\n${arcDescriptions.map(d => "• " + d).join("\n")}`
                                         : conclusion.description),
@@ -400,9 +402,13 @@ export default class ExecutePanelManager {
         for (const [key, group] of groups) {
             const isParallelGroup = group.length > 1;
 
+            // const simulateButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-play" })]);
+            // const downloadButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-arrow-down" })]);
+            // const deleteButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-close" })]);
             const simulateButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-play" })]);
             const downloadButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-arrow-down" })]);
-            const deleteButton = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-close" })]);
+            const deleteButton   = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-close" })]);
+            const ttButton       = buildElement("button", { classname: "icon" }, [buildElement("i", { classname: "fas fa-diagram-project" })]);
 
             const passed = group[0].conclusion?.pass || false;
             const origin = { aes: "Simulated", direct: "Direct Input", ae: "Generated", import: "From File", pae: "Parallel Extracted" }[group[0].origin] || "";
@@ -437,6 +443,18 @@ export default class ExecutePanelManager {
                 }
             });
 
+            const PALETTE = [
+                "#3a81de","#4caf50","#ff9800","#9c27b0",
+                "#e91e63","#00bcd4","#795548","#607d8b",
+            ];
+            const groupColors = group.map((_, i) => PALETTE[i % PALETTE.length]);
+
+            ttButton.addEventListener("click", () => {
+                const snapshot = this.context.managers.visualModel.makeCopy();
+                new TraversalTreeViewerManager(this.context, snapshot, groupColors);
+            });
+            ttButton.style.display = isParallelGroup ? "" : "none";
+
             const actRow = buildElement("tr", { "data-passed": passed }, [
                 buildElement("td", {}, [
                     buildElement("div", { classname: "activity-name" }, [label]),
@@ -448,6 +466,7 @@ export default class ExecutePanelManager {
                     ]),
                     ...subLabels
                 ]),
+                // buildElement("td", {}, [simulateButton, downloadButton, deleteButton])
                 buildElement("td", {}, [simulateButton, downloadButton, deleteButton])
             ]);
 

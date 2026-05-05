@@ -909,7 +909,8 @@ export function checkCompetingProcesses(activities, simpleModel) {
     arcL:            L,
     usedByProcessIds,
     winnerProcessId: usedByProcessIds[0] ?? null,
-    loserProcessIds: usedByProcessIds.slice(1),
+    winnerProcessIds: usedByProcessIds.slice(0, L),
+    loserProcessIds: usedByProcessIds.slice(L),
     totalTraversals: usedByProcessIds.length,
     reason:
       `Arc uid=${arcUID} (L=${L}) used by ${usedByProcessIds.length} activities ` +

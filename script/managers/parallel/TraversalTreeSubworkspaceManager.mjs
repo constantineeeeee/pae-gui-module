@@ -1,4 +1,5 @@
 import { generateUniqueID } from "../../utils.mjs";
+import ProcessColorRegistry from "../../services/parallel/ProcessColorRegistry.mjs";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -16,11 +17,13 @@ export default class TraversalTreeViewerManager {
   #subworkspace;
   #svg;
   #root;
+  #groupColors = null;
 
-  constructor(context, visualModelSnapshot) {
+  constructor(context, visualModelSnapshot, groupColors = null) {
     this.context = context;
     this.id = generateUniqueID();
     this.#snapshot = visualModelSnapshot;
+    this.#groupColors = groupColors;
 
     this.#initialize();
   }
@@ -300,16 +303,19 @@ export default class TraversalTreeViewerManager {
     defs.appendChild(marker);
 
     // ── Path color palette and per-color arrowheads ───────────────────────────
-    const PATH_COLORS = [
-      "#3a81de", // blue
-      "#4caf50", // green
-      "#ff9800", // orange
-      "#9c27b0", // purple
-      "#e91e63", // pink
-      "#00bcd4", // cyan
-      "#795548", // brown
-      "#607d8b", // blue-grey
-    ];
+    // const PATH_COLORS = [
+    //   "#3a81de", // blue
+    //   "#4caf50", // green
+    //   "#ff9800", // orange
+    //   "#9c27b0", // purple
+    //   "#e91e63", // pink
+    //   "#00bcd4", // cyan
+    //   "#795548", // brown
+    //   "#607d8b", // blue-grey
+    // ];
+    const PATH_COLORS = ProcessColorRegistry.hasRegistrations
+      ? ProcessColorRegistry.getAllColors()
+      : ["#3a81de","#4caf50","#ff9800","#9c27b0","#e91e63","#00bcd4","#795548","#607d8b"];
 
     // Create one arrowhead marker per palette color so arrows match edges
     PATH_COLORS.forEach((color, idx) => {
@@ -857,10 +863,13 @@ export default class TraversalTreeViewerManager {
     };
 
     if (res.maximalPaths && res.maximalPaths.length > 0) {
-      const PATH_COLORS = [
-        "#3a81de", "#4caf50", "#ff9800", "#9c27b0",
-        "#e91e63", "#00bcd4", "#795548", "#607d8b",
-      ];
+      // const PATH_COLORS = [
+      //   "#3a81de", "#4caf50", "#ff9800", "#9c27b0",
+      //   "#e91e63", "#00bcd4", "#795548", "#607d8b",
+      // ];
+      const PATH_COLORS = ProcessColorRegistry.hasRegistrations
+      ? ProcessColorRegistry.getAllColors()
+      : ["#3a81de","#4caf50","#ff9800","#9c27b0","#e91e63","#00bcd4","#795548","#607d8b"];
 
       const list = document.createElement("div");
       list.style.cssText =

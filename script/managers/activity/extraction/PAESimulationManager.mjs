@@ -25,6 +25,7 @@ import {
     generateUniqueID,
 } from "../../../utils.mjs";
 import ModelContext from "../../model/ModelContext.mjs";
+import ProcessColorRegistry from "../../../services/parallel/ProcessColorRegistry.mjs";
 
 export class PAESimulationManager {
     /** @type {ModelContext} */
@@ -129,12 +130,9 @@ export class PAESimulationManager {
 
         // Flatten the result into a display-friendly list
         this.#processEntries = this.#flattenResult(this.#result);
+        ProcessColorRegistry.registerFromEntries(this.#processEntries);
+
     }
-
-    // -------------------------------------------------------------------------
-    // Result accessors — consumed by whatever panel/drawing manager you wire up
-    // -------------------------------------------------------------------------
-
     /**
      * True when PAE found at least one set of parallel maximal activities.
      * @returns {boolean}
@@ -253,10 +251,11 @@ export class PAESimulationManager {
                 const [from, to] = this.getArcIdentifierPair(entry.arcUID);
                 const fromStr = from || `uid=${entry.arcUID}`;
                 const toStr   = to   || "?";
+                const winnerIds = entry.winnerProcessIds ?? [entry.winnerProcessId];
                 return (
                     `arc (${fromStr} → ${toStr}) with L=${entry.arcL}: ` +
-                    `${entry.loserProcessIds.length + 1} process(es) competed — ` +
-                    `process ${entry.winnerProcessId} won, ` +
+                    `${winnerIds.length + entry.loserProcessIds.length} process(es) competed — ` +
+                    `process(es) ${winnerIds.join(", ")} won, ` +
                     `process(es) ${entry.loserProcessIds.join(", ")} locked`
                 );
             });
@@ -301,9 +300,9 @@ export class PAESimulationManager {
                 pass:        true,
                 title:       `${this.groupCount} set(s) of parallel maximal activities found — ${impededEntries.length} impeded`,
                 description:
-                    `${this.groupCount} set(s) of parallel maximal activities were successfully extracted. ` +
-                    `However, ${impededEntries.length} additional process(es) could not complete due to ${reasonStr}. ` +
-                    `The impeded activities are shown separately below with the arc(s) at which they were stopped highlighted in red.`,
+                    `${this.groupCount} set(s) of parallel maximal activities were successfully extracted. `
+                    // `However, ${impededEntries.length} additional process(es) could not complete due to ${reasonStr}. ` +
+                    // `The impeded activities are shown separately below with the arc(s) at which they were stopped highlighted in red.`,
             };
         }
 
