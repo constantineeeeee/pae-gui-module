@@ -357,6 +357,7 @@ export function generateTraversalTreeFromJSON(
             );
 
             const isValidCombination = (pair) => {
+              // Check 1: no conflicting explicit choices (original check)
               let mergedChoices = {};
               for (let n of pair) {
                 for (let [nodeV, choiceVal] of Object.entries(n.choices)) {
@@ -368,6 +369,23 @@ export function generateTraversalTreeFromJSON(
                   mergedChoices[nodeV] = choiceVal;
                 }
               }
+
+              // Check 2 (AND-joins only): ancestry prefix must be shared.
+              // At an AND-join, nodes that came through DIFFERENT OR-split
+              // branches must not merge — they belong to separate activities.
+              // Nodes from the same branch share the same S prefix (all
+              // elements up to but not including the last arc's C-value).
+              //
+              // MIX-joins are intentionally excluded: the ε and Σ branches
+              // always have different S prefixes (they arrived via different
+              // OR-split choices), but they are SUPPOSED to merge.
+              const joinType = joinTypes.get(joinV);
+              if (joinType === "AND" && pair.length > 1) {
+                const prefixes = pair.map(n => n.S.slice(0, -1).join(","));
+                const first = prefixes[0];
+                if (!prefixes.every(p => p === first)) return false;
+              }
+
               return true;
             };
 
@@ -388,7 +406,14 @@ export function generateTraversalTreeFromJSON(
             }
 
             let mergedNodesThisIteration = new Set();
-            let spawnedMixOrIndependent = false; // ensure single MIX-OR clone
+            // Track which S-ancestry prefixes have already spawned a MIX-OR
+            // independent clone. One clone per distinct ancestry is correct —
+            // the MIX-OR independent activity is unique per OR-split branch,
+            // not unique per join vertex. Using a flat boolean would suppress
+            // the MIX-OR clone for the second OR-split branch (e.g. the 'b'
+            // branch at x6 would lose its MIX-OR clone because the 'a' branch
+            // already set the flag).
+            const spawnedMixOrByPrefix = new Set();
 
             for (let pair of validCombinations) {
               const joinType = joinTypes.get(joinV);
@@ -481,14 +506,18 @@ export function generateTraversalTreeFromJSON(
                   );
 
                   // MIX-OR independent path: Σ arc passes through alone. This
-                  // is ONE activity choice regardless of how many ε partners
-                  // exist — produce it only once across all merge variants
-                  // at this join. Without this guard, a MIX-join with N
-                  // ε partners would emit N identical Σ-only paths.
-                  if (!spawnedMixOrIndependent) {
+                  // is ONE activity choice per OR-split ancestry — produce it
+                  // once per distinct Σ-node ancestry prefix. A MIX-join with N
+                  // ε partners from the SAME ancestry should only emit ONE
+                  // Σ-only path, but a MIX-join where ε partners come from
+                  // DIFFERENT OR-split branches (different S prefixes) must emit
+                  // one Σ-only path per distinct ancestry, because each is an
+                  // independent activity.
+                  const mixOrKey = nodeC.S.slice(0, -1).join(",");
+                  if (!spawnedMixOrByPrefix.has(mixOrKey)) {
                     let mixOrChoices = { ...nodeC.choices, [joinV]: "OR" };
                     createMergedNode([phC], joinV, [...nodeC.S], mixOrChoices);
-                    spawnedMixOrIndependent = true;
+                    spawnedMixOrByPrefix.add(mixOrKey);
                   }
                 }
               }
@@ -500,7 +529,9 @@ export function generateTraversalTreeFromJSON(
             }
 
             for (let n of mergedNodesThisIteration) n.isPending = false;
-            progressedThisIteration = true;
+            if (mergedNodesThisIteration.size > 0) {
+              progressedThisIteration = true;
+            }
           }
         }
       }
@@ -659,13 +690,35 @@ export function generateTraversalTreeFromJSON(
     n.children = n.children.filter((c) => survivingEdges.has(`${n.id}->${c.id}`));
   });
 
-  // ── Time assignment (Algorithm 1 lines 24–25) ────────────────────────────
-  // Per the manuscript, time `t` at a merge equals max-T across joining
-  // branches. For non-merge nodes, time is parent's time + 1 (one i-step
-  // forward). Compute via topological pass: arc-firings (nodes with a
-  // triggerEdge) advance the clock by one; placeholders, merge nodes, and
-  // MIX-OR/MIX-AND result nodes are synthetic and inherit the parent's
-  // time without incrementing.
+  // ── Time assignment (visual column layout) ───────────────────────────────
+  // The `time` value drives the X-column in the renderer (left = 0, right
+  // increases).  We want the layout to match the manuscript figures exactly:
+  //
+  //   arc-firing node  : parentTime + 1          (one column forward)
+  //   placeholder (z)  : parentTime + 1          (one column forward — it
+  //                                               IS a visual step, sitting
+  //                                               BETWEEN its parent and the
+  //                                               merged output it feeds)
+  //   merged/result    : max(parent times)        (same column as its
+  //                                               placeholder parents, which
+  //                                               have already advanced by 1)
+  //
+  // This produces the three-column pattern from the manuscript:
+  //
+  //   xS[t=N] → (z)[t=N+1] → zS[t=N+1]   ← placeholder and output share
+  //                                            column N+1 (left of output)
+  //
+  // Wait — that still collapses them.  The manuscript shows (z) and zS as
+  // TWO separate columns.  So merged output must be at t=N+2:
+  //
+  //   xS[t=N] → (z)[t=N+1] → zS[t=N+2]
+  //
+  // So: placeholder advances by 1, merged output also advances by 1 from
+  // its placeholder parents.  Since the merged output's parents ARE the
+  // placeholders (already at N+1), "max(parent times) + 0" would put the
+  // merged output at N+1.  We need "+1" for merge nodes too, but ONLY when
+  // they are children of placeholders (i.e. they follow a placeholder step).
+  // We detect this by checking whether ALL parents are placeholders.
 
   // Topological order via Kahn's algorithm
   const indeg = new Map();
@@ -684,25 +737,25 @@ export function generateTraversalTreeFromJSON(
   for (const n of order) {
     if (n.parents.length === 0) {
       n.time = 0;
+      n.col  = 0;
       continue;
     }
     const parentMaxTime = Math.max(...n.parents.map((p) => p.time ?? 0));
+    const parentMaxCol  = Math.max(...n.parents.map((p) => p.col  ?? 0));
+    const isArcFiring   = n.triggerEdge !== null && n.triggerEdge !== undefined;
+    const isPlaceholder = !!(n.isPlaceholder || n.placeholder || n.isJoinProxy);
 
-    // A node represents a true arc firing only when it has a triggerEdge —
-    // i.e., it was created by a forward-traversal step. Placeholders, merge
-    // nodes, and MIX-OR/MIX-AND result nodes have triggerEdge === null;
-    // they are synthetic markers that sit AT the join i-step, not a step
-    // beyond it. This matches the manuscript's line 24-25 max-T rule:
-    // joining/merging happens AT the max parent time, not after.
-    const isArcFiring = n.triggerEdge !== null && n.triggerEdge !== undefined;
-
+    // ── Semantic time (PAE i-step) ────────────────────────────────────────
     if (isArcFiring) {
-      // Normal forward step: one i-step beyond the parent.
       n.time = parentMaxTime + 1;
     } else {
-      // Placeholder, merge, or MIX-OR/MIX-AND result — sits at parent time.
-      n.time = parentMaxTime;
+      n.time = parentMaxTime; // placeholder and merge both inherit parent time
     }
+
+    // ── Visual column (X position in renderer) ────────────────────────────
+    // Every node advances by 1 so nothing overlaps. Arc-firings, placeholders,
+    // and merge results each get their own column.
+    n.col = parentMaxCol + 1;
   }
 
   return {

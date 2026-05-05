@@ -334,9 +334,10 @@ export default class TraversalTreeViewerManager {
     const childrenOf = new Map();
     res.allNodes.forEach((n) => childrenOf.set(n.id, []));
 
-    // Process nodes from latest time to earliest so we assign parents greedily
+    // Process nodes from highest col to lowest so parents are always
+    // processed before children in the parentOf assignment below.
     const sortedNodes = [...res.allNodes].sort(
-      (a, b) => (b.time ?? 0) - (a.time ?? 0),
+      (a, b) => (b.col ?? 0) - (a.col ?? 0),
     );
 
     const parentOf = new Map();
@@ -367,11 +368,36 @@ export default class TraversalTreeViewerManager {
       children: roots.map(toTree),
     };
 
+    // Sort children: shorter branches (smaller max col) at the top so
+    // leaf nodes cluster near the top of the tree, not the bottom.
+    {
+      const maxColOf = (treeNode) => {
+        const col = treeNode.ref?.col ?? 0;
+        if (!treeNode.children || treeNode.children.length === 0) return col;
+        return Math.max(col, ...treeNode.children.map(maxColOf));
+      };
+      const sortTree = (treeNode) => {
+        if (treeNode.children && treeNode.children.length > 1) {
+          treeNode.children.sort((a, b) => maxColOf(a) - maxColOf(b));
+        }
+        for (const c of treeNode.children ?? []) sortTree(c);
+      };
+      sortTree(superRoot);
+    }
+
     const rootH = d3.hierarchy(superRoot);
 
-    // ── D3 tree layout ────────────────────────────────────────────────────────
-    // nodeSize: [vertical spacing, horizontal spacing]
-    // We map d.y -> x (horizontal), d.x -> y (vertical)
+    // ── Layout: col-based X, D3-tree Y ───────────────────────────────────────
+    // X position is determined by the node's `col` value — a visual column
+    // index that always increments by 1 for every node so nothing overlaps.
+    // `time` holds the correct PAE i-step (shared between placeholders and
+    // their merge results) and is shown as the "i=N" label on edges; `col`
+    // is purely for rendering separation.
+    //
+    // Map distinct col values → pixel X
+    const allCols = [...new Set(res.allNodes.map(n => n.col ?? 0))].sort((a,b)=>a-b);
+    const colToRank = new Map(allCols.map((c,i) => [c,i]));
+
     const treeLayout = d3.tree().nodeSize([Y_GAP, X_GAP]);
     treeLayout(rootH);
 
@@ -380,36 +406,16 @@ export default class TraversalTreeViewerManager {
     const minX = Math.min(...nodes.map((d) => d.x));
     const verticalShift = TOP_PAD - minX + 40;
 
-    // Seed layout positions from D3
+    // Build layoutPos: X from col rank, Y from D3's vertical placement
     const layoutPos = new Map();
     nodes.forEach((d) => {
+      const nodeCol = d.data.ref?.col ?? 0;
+      const rank = colToRank.get(nodeCol) ?? 0;
       layoutPos.set(d.data.id, {
-        x: LEFT_PAD + d.y,
+        x: LEFT_PAD + rank * X_GAP,
         y: d.x + verticalShift,
       });
     });
-
-    // ── DEBUG: log all node positions after D3 layout ─────────────────────────
-    console.log("[TT DEBUG] Total allNodes:", res.allNodes.length, "D3 nodes:", nodes.length);
-    for (const n of res.allNodes) {
-      const pos = layoutPos.get(n.id);
-      const label = n.isPlaceholder ? `(${n.v})` : `${n.v} S(${JSON.stringify(n.S)})`;
-      console.log(`[TT NODE] id=${n.id} v=${n.v} placeholder=${!!n.isPlaceholder} ` +
-        `parents=[${(n.parents??[]).map(p=>p.id).join(",")}] ` +
-        `children=[${(n.children??[]).map(c=>c.id).join(",")}] ` +
-        `pos=${pos ? Math.round(pos.x)+","+Math.round(pos.y) : "MISSING"} ` +
-        `label="${label}"`);
-    }
-
-    // ── DEBUG: log allNodes from algorithm ───────────────────────────────────
-    console.log("[TT DEBUG] allNodes from algorithm:");
-    for (const n of res.allNodes) {
-      console.log(`  [ALG NODE] id=${n.id} v=${n.v} S=${JSON.stringify(n.S)} ` +
-        `triggerC=${n.triggerC} isPlaceholder=${!!n.isPlaceholder} ` +
-        `joinGroupId=${n.joinGroupId ?? "none"} ` +
-        `parents=[${(n.parents??[]).map(p=>p.id).join(",")}] ` +
-        `children=[${(n.children??[]).map(c=>c.id).join(",")}]`);
-    }
 
     // ── Adjust MIX/OR placeholder groups ──────────────────────────────────
     // Two distinct cases driven by the join type of the placeholders' vertex:
@@ -535,55 +541,31 @@ export default class TraversalTreeViewerManager {
             }
           }
         } else {
-          // ── OR-join branch (default symmetrization) ────────────────────
-          // Compute the midpoint y of all placeholders' parents
-          const parentYs = [];
+          // ── OR-join / AND-join branch ──────────────────────────────────
+          // Each placeholder stays aligned with its own parent's Y so that
+          // every branch is a straight horizontal line. The sync bar between
+          // placeholders is allowed to be diagonal — that's fine. We do NOT
+          // pull placeholders or outputs toward a shared midpoint, which is
+          // what was creating the diamond / chevron shape.
           for (const ph of placeholders) {
-            for (const p of ph.parents ?? []) {
-              const py = layoutPos.get(p.id)?.y;
-              if (typeof py === "number") parentYs.push(py);
+            const parent = ph.parents?.[0];
+            if (!parent) continue;
+            const parentPos = layoutPos.get(parent.id);
+            const phPos    = layoutPos.get(ph.id);
+            if (!parentPos || !phPos) continue;
+            if (Math.abs(parentPos.y - phPos.y) >= 1) {
+              layoutPos.set(ph.id, { x: phPos.x, y: parentPos.y });
             }
           }
-          if (parentYs.length < 2) continue;
-          const midY = parentYs.reduce((a, b) => a + b, 0) / parentYs.length;
-
-          // Symmetrically distribute placeholders around midY
-          // (preserving their original ordering by current y)
-          placeholders.sort((a, b) => {
-            const ay = layoutPos.get(a.id)?.y ?? 0;
-            const by = layoutPos.get(b.id)?.y ?? 0;
-            return ay - by;
-          });
-          const phSpread = Math.max(80, Y_GAP * 0.6);
-          const N_ph = placeholders.length;
-          placeholders.forEach((ph, idx) => {
-            const targetY = midY + (idx - (N_ph - 1) / 2) * phSpread;
-            const cur = layoutPos.get(ph.id);
-            if (!cur) return;
-            const dy = targetY - cur.y;
-            if (Math.abs(dy) >= 1) {
-              // Move just the placeholder (children will be repositioned below)
-              layoutPos.set(ph.id, { x: cur.x, y: targetY });
-            }
-          });
-
-          // Symmetrically distribute output nodes around midY
-          outputs.sort((a, b) => {
-            const ay = layoutPos.get(a.id)?.y ?? 0;
-            const by = layoutPos.get(b.id)?.y ?? 0;
-            return ay - by;
-          });
-          const outSpread = Math.max(80, Y_GAP * 0.6);
-          const N_out = outputs.length;
-          outputs.forEach((out, idx) => {
-            const targetY = midY + (idx - (N_out - 1) / 2) * outSpread;
-            const cur = layoutPos.get(out.id);
-            if (!cur) return;
-            const dy = targetY - cur.y;
-            if (Math.abs(dy) >= 1) {
-              shiftSubtreeYPre(out.id, dy);
-            }
-          });
+          // Snap each output node to its placeholder parent's Y as well
+          for (const out of outputs) {
+            const outPos = layoutPos.get(out.id);
+            if (!outPos || (out.parents?.length ?? 0) !== 1) continue;
+            const phPos = layoutPos.get(out.parents[0].id);
+            if (!phPos) continue;
+            const dy = phPos.y - outPos.y;
+            if (Math.abs(dy) >= 1) shiftSubtreeYPre(out.id, dy);
+          }
         }
       }
     }
@@ -661,28 +643,21 @@ export default class TraversalTreeViewerManager {
       }
     }
 
-    // ── DEBUG: log final positions after all adjustments ────────────────────
-    console.log("[TT DEBUG] Final layoutPos after adjustments:");
-    for (const [id, pos] of layoutPos) {
-      const n = res.allNodes.find(n => n.id === id);
-      const label = n ? (n.isPlaceholder ? `(${n.v})` : `${n.v} S(${JSON.stringify(n.S)})`) : "?";
-      console.log(`  [FINAL POS] id=${id} x=${Math.round(pos.x)} y=${Math.round(pos.y)} label="${label}"`);
-    }
-
-    // Check for overlapping positions
-    const posGroups = new Map();
-    for (const [id, pos] of layoutPos) {
-      const key = `${Math.round(pos.x)},${Math.round(pos.y)}`;
-      if (!posGroups.has(key)) posGroups.set(key, []);
-      posGroups.get(key).push(id);
-    }
-    for (const [key, ids] of posGroups) {
-      if (ids.length > 1) {
-        const labels = ids.map(id => {
-          const n = res.allNodes.find(n => n.id === id);
-          return n ? `${n.id}:${n.v}` : id;
-        });
-        console.warn(`[TT OVERLAP] Position ${key} has ${ids.length} nodes: ${labels.join(", ")}`);
+    // ── Re-center tree vertically ──────────────────────────────────────────
+    // The overlap resolution only pushes nodes downward, which causes a
+    // cascading drift that leaves the top of the tree sparse and clusters
+    // everything toward the bottom. Shift the whole layout so the topmost
+    // node sits at TOP_PAD.
+    {
+      const allYs = [...layoutPos.values()].map(p => p.y);
+      if (allYs.length > 0) {
+        const minY = Math.min(...allYs);
+        const shift = TOP_PAD - minY;
+        if (Math.abs(shift) > 1) {
+          for (const [id, p] of layoutPos) {
+            layoutPos.set(id, { x: p.x, y: p.y + shift });
+          }
+        }
       }
     }
 
@@ -710,21 +685,23 @@ export default class TraversalTreeViewerManager {
       finalPos.set(n.id, { id: n.id, v: n.v, ...dims });
     }
 
-    // ── Draw synchronization bars between nodes sharing a joinGroupId ─────────
-    // This covers two cases:
-    //   1. Placeholder nodes (isPlaceholder=true) from OR/MIX-joins — these
-    //      already had joinGroupId set during tree generation.
-    //   2. Arrival nodes tagged isOrSubgroupMember=true — these are the actual
-    //      pending-merge nodes at an AND-join where multiple incoming arcs share
-    //      the same C-value (Structure 8). No extra placeholder is inserted;
-    //      the sync bar is drawn directly between these arrival nodes.
+    // ── Draw synchronization bars ─────────────────────────────────────────────
+    // Rule: draw a sync bar ONLY when placeholder nodes exist for a group.
+    // Placeholder nodes are created exclusively for OR-joins and MIX-joins
+    // (via insertJoinPlaceholders). AND-join merged nodes have no placeholders,
+    // so they never get a sync bar — automatically, with no special-case code.
+    //
+    // The bar does not need to be perfectly vertical — we draw straight
+    // segments between consecutive placeholder centres (top to bottom),
+    // which means the bar naturally follows wherever the layout placed those
+    // placeholders.
     {
+      // Collect ONLY placeholder nodes, grouped by their joinGroupId.
       const groupBuckets = new Map();
       for (const n of res.allNodes) {
+        if (!this.#isPlaceholder(n)) continue;   // skip non-placeholders (incl. AND-join nodes)
         const gid = n.joinGroupId;
         if (!gid) continue;
-        // Include placeholders AND tagged OR-subgroup members
-        if (!this.#isPlaceholder(n) && !n.isOrSubgroupMember) continue;
         const pos = finalPos.get(n.id);
         if (!pos) continue;
         if (!groupBuckets.has(gid)) groupBuckets.set(gid, []);
@@ -733,21 +710,29 @@ export default class TraversalTreeViewerManager {
 
       for (const [, positions] of groupBuckets) {
         if (positions.length < 2) continue;
-        const xs = positions.map(p => p.x + (p.w ?? 0) / 2);
-        const ys = positions.map(p => p.yMid);
-        const avgX = xs.reduce((a, b) => a + b, 0) / xs.length;
-        const yMin = Math.min(...ys);
-        const yMax = Math.max(...ys);
 
-        const bar = document.createElementNS(SVG_NS, "line");
-        bar.setAttribute("x1", String(avgX));
-        bar.setAttribute("y1", String(yMin));
-        bar.setAttribute("x2", String(avgX));
-        bar.setAttribute("y2", String(yMax));
-        bar.setAttribute("stroke", "currentColor");
-        bar.setAttribute("stroke-width", "1.6");
-        bar.setAttribute("opacity", "0.6");
-        edgeGroup.appendChild(bar);
+        // Sort top to bottom by yMid so segments go in the right direction
+        const sorted = [...positions].sort((a, b) => a.yMid - b.yMid);
+
+        // Draw one segment between each consecutive pair of placeholders
+        for (let k = 0; k < sorted.length - 1; k++) {
+          const p1 = sorted[k];
+          const p2 = sorted[k + 1];
+
+          // Use the horizontal centre of each placeholder node
+          const x1 = p1.x + (p1.w ?? 0) / 2;
+          const x2 = p2.x + (p2.w ?? 0) / 2;
+
+          const bar = document.createElementNS(SVG_NS, "line");
+          bar.setAttribute("x1", String(x1));
+          bar.setAttribute("y1", String(p1.yMid));
+          bar.setAttribute("x2", String(x2));
+          bar.setAttribute("y2", String(p2.yMid));
+          bar.setAttribute("stroke", "currentColor");
+          bar.setAttribute("stroke-width", "1.6");
+          bar.setAttribute("opacity", "0.6");
+          edgeGroup.appendChild(bar);
+        }
       }
     }
 
