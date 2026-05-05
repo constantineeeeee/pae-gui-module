@@ -28,9 +28,6 @@ import {
 import { checkCompetingProcesses } from "./impedance-freeness.mjs";
 import { Cycle } from "./soundness/utils/cycle.mjs";
 
-// =============================================================================
-// Typedefs
-// =============================================================================
 
 /**
  * @typedef {number} ArcUID
@@ -75,9 +72,7 @@ import { Cycle } from "./soundness/utils/cycle.mjs";
  * } | null} PAEResult
  */
 
-// =============================================================================
 // SECTION 1 — Process lifecycle
-// =============================================================================
 
 export function createProcess(id, startVertex) {
   return {
@@ -127,9 +122,7 @@ export function markProcessPending(process, arcUID) {
   process.pendingArcUID = arcUID;
 }
 
-// =============================================================================
 // SECTION 2 — Split handling
-// =============================================================================
 
 export function getSplitType(vertexUID, cache) {
   const { arcsMatrix, arcMap } = cache;
@@ -158,9 +151,7 @@ export function spawnProcessesFromSplit(parentProcess, splitArcUIDs, idCounter) 
   return spawned;
 }
 
-// =============================================================================
 // SECTION 3 — Join detection and resolution
-// =============================================================================
 
 /**
  * Returns the set of vertex UIDs reachable from `startUID` by following
@@ -630,9 +621,7 @@ function mergeOneVariant(resolveGroup, incomingArcs, joinVertexUID, processes, c
   return true;
 }
 
-// =============================================================================
 // SECTION 4 — Competition handling
-// =============================================================================
 
 export function getTotalArcTraversals(processes, arcUID) {
   let total = 0;
@@ -736,9 +725,7 @@ export function resolveCompetition(processes, arcUID, cache, competitionLog) {
   return losers.length > 0;
 }
 
-// =============================================================================
 // SECTION 5 — Process interruption
-// =============================================================================
 
 /**
  * Builds the set of vertices VGu of an RBS Gu given its center UID. Per the
@@ -863,18 +850,20 @@ export function checkProcessInterruption(processes, exitingProcess, arcUID, cach
   // interrupted by another exit). We don't interrupt processes that are
   // outside the RBS — and we don't re-interrupt locked or done processes.
   //
-  // Critically: if a sibling is at the SAME vertex as the outbridge source
-  // (arc.fromVertexUID), it is co-located at the exit point and will traverse
-  // the outbridge itself on its next step. This is NOT a process interruption —
-  // it is simply multiple activities exiting through the same outbridge, which
-  // is normal OR-join / independent-exit behaviour. Skip those siblings.
+  // Co-located sibling handling: a sibling at the SAME vertex as the
+  // outbridge source is only safe to skip if it is itself heading for an
+  // outbridge (it will exit the RBS independently on its next step).
+  // Siblings whose nextArcUID is null or points to a non-outbridge arc are
+  // going deeper into the RBS and MUST be interrupted.
   const interruptedSiblings = processes.filter(
     (p) =>
       p.id !== exitingProcess.id &&
       (p.status === "active" || p.status === "pending") &&
       p.status !== "done" && p.status !== "locked" &&
       isVertexInRBS(p.currentVertex, rbsCenterUID, cache) &&
-      p.currentVertex !== arc.fromVertexUID,   // ← skip co-located siblings at the exit vertex
+      !(p.currentVertex === arc.fromVertexUID &&
+        p.nextArcUID !== null &&
+        isOutbridge(p.nextArcUID, arcMap, rbsMatrix)),
   );
 
   if (interruptedSiblings.length === 0) {
@@ -1013,25 +1002,36 @@ export function tryResumeInterruptedProcesses(processes, cache) {
         `(viable resolution at vertex ${resolutionVertex} with Process ${resolutionPartnerId}).`
       );
     } else {
-      // No AND/MIX-join resolution partner found — reactivate independently.
-      // The process continues toward the sink as its own separate activity,
-      // flagged as interrupted (interruptedByRBS remains set so getTerminationResult
-      // can identify it and report it in the interruptionLog).
-      // This is NOT a deadlock: the process is still viable, it simply has no
-      // join-merge partner. Any further impedance (e.g. competition on a shared
-      // arc) will be caught by the competition checks during traversal.
-      proc.status = "active";
-      console.log(
-        `  PI: Process ${proc.id} resuming independently (no join-resolution partner — ` +
-        `activity will be flagged as interrupted in the result).`
+      // No AND/MIX-join resolution partner found.
+      // If another process is still inside the same RBS, the interrupted
+      // process may still encounter a merge opportunity or reach an outbridge
+      // — allow it to keep moving. Once ALL other processes have left the RBS
+      // the interrupted process is truly stranded and must be locked: it
+      // represents an activity that was interrupted by the RBS reset and
+      // should not complete.
+      const piRbsCenter = proc.interruptedByRBS;
+      const siblingStillInside = processes.some(p =>
+        p.id !== proc.id &&
+        (p.status === "active" || p.status === "pending") &&
+        isVertexInRBS(p.currentVertex, piRbsCenter, cache)
       );
+
+      if (siblingStillInside) {
+        proc.status = "active";
+        console.log(
+          `  PI: Process ${proc.id} resuming (sibling still inside RBS ${piRbsCenter} — ` +
+          `will re-evaluate next iteration).`
+        );
+      } else {
+        lockProcess(proc);
+        console.log(
+          `  PI: Process ${proc.id} LOCKED — all other processes exited RBS ${piRbsCenter}. ` +
+          `Activity interrupted (no resolution join available).`
+        );
+      }
     }
   }
 }
-
-// =============================================================================
-// SECTION 6 — Termination check
-// =============================================================================
 
 /**
  * @param {Process[]} processes
@@ -1200,6 +1200,44 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
     }
   }
 
+  // ── PI-locked processes ─────────────────────────────────────────────────
+  // Processes that were interrupted by an RBS reset and then locked (all
+  // siblings exited the RBS while this process was still inside, and no
+  // AND-join resolution existed). Report them in the interruptionLog so
+  // the GUI can display the interruption, and add to impededResults.
+  for (const proc of processes) {
+    if (proc.status !== "locked" || proc.interruptedByRBS === null) continue;
+    if (impededResults.some(ir => ir.processId === proc.id)) continue;
+
+    const rbsCenter = proc.interruptedByRBS;
+    const centerLabel = cache.vertexMap?.[rbsCenter]?.identifier ?? rbsCenter;
+
+    // Identify all processes that exited this RBS (done or moved outside)
+    const exitedProcessIds = processes
+      .filter(p =>
+        p.id !== proc.id &&
+        (p.status === "done" || p.status === "active") &&
+        !isVertexInRBS(p.currentVertex, rbsCenter, cache)
+      )
+      .map(p => p.id);
+
+    interruptionLog.push({
+      rbsCenter:        centerLabel,
+      activityIds:      [proc.id],
+      overlapTimesteps: [],
+      aExitTimestep:    null,
+      bExitTimestep:    null,
+      violatingArcUIDs: [],
+      reason:
+        `Process ${proc.id} was marked PENDING (interrupted) while still inside ` +
+        `RBS (center ${centerLabel}) — Process(es) ${exitedProcessIds.join(" and ")} ` +
+        `exited the RBS while Process ${proc.id} was still inside. No AND-join ` +
+        `exists in the succeeding arcs after the interruption point — activity ` +
+        `cannot reach the sink.`,
+    });
+    impededResults.push({ processId: proc.id, activityProfile: proc.states.activityProfile });
+  }
+
   // Remove empty or single-entry sets from parallelActivitySets after PI filtering
   const filteredParallelSets = parallelActivitySets.filter(s => s.length >= 2);
   parallelActivitySets.length = 0;
@@ -1266,10 +1304,6 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
   };
 }
 
-
-// =============================================================================
-// SECTION 6.5 — Cycle / loop detection helpers
-// =============================================================================
 
 /**
  * Builds arcUID → eRU map from cycle detection.
@@ -1345,9 +1379,8 @@ function sortArcsLoopFirst(outgoingArcUIDs, CTIndicator, cycleEruMap) {
   return [...loopArcs, ...nonLoopArcs];
 }
 
-// =============================================================================
+
 // SECTION 7 — Main algorithm
-// =============================================================================
 
 export function parallelActivityExtraction(source, sink, cache, simpleModel = null) {
   const { arcMap, arcsMatrix } = cache;
@@ -1371,6 +1404,59 @@ export function parallelActivityExtraction(source, sink, cache, simpleModel = nu
     for (const proc of processes.filter((p) => p.status === "active")) {
       // Re-check — could have been locked/done mid-iteration
       if (proc.status !== "active") continue;
+
+      // ── PI in-loop lock check ─────────────────────────────────────────────
+      // A PI-interrupted process must be locked the moment all its siblings
+      // have left the RBS AND no downstream AND/MIX-join resolution exists.
+      // Checking here (inside the active-process loop) catches the case where
+      // two PI siblings are at the same vertex and would otherwise both exit
+      // the RBS in the same iteration — by the time tryResumeInterruptedProcesses
+      // runs, both have already cleared their PI markers.
+      //
+      // However, if a live partner can still meet this process at a downstream
+      // AND/MIX-join (e.g. an outbridge feeds into an AND-join with arcs from
+      // another branch), the process must NOT be locked — it should continue
+      // toward that merge vertex.
+      if (proc.interruptedByRBS !== null) {
+        const piCenter = proc.interruptedByRBS;
+        const siblingStillInside = processes.some(p =>
+          p.id !== proc.id &&
+          (p.status === "active" || p.status === "pending") &&
+          isVertexInRBS(p.currentVertex, piCenter, cache)
+        );
+        if (!siblingStillInside) {
+          // Before locking, check if a resolution AND/MIX-join is reachable.
+          const myReach = forwardReachableVertices(proc.currentVertex, cache.arcsMatrix);
+          let hasResolution = false;
+          for (const partner of processes) {
+            if (partner.id === proc.id) continue;
+            if (partner.status === "locked" || partner.status === "done") continue;
+            const partnerReach = forwardReachableVertices(partner.currentVertex, cache.arcsMatrix);
+            for (const v of myReach) {
+              if (!partnerReach.has(v)) continue;
+              if (v === proc.currentVertex || v === partner.currentVertex) continue;
+              const incoming = [...getIncomingArcs(v, cache.arcsMatrix)];
+              if (incoming.length < 2) continue;
+              const jt = getJoinType(v, cache, processes, null);
+              if (jt === "AND-join" || jt === "MIX-AND-join" || jt === "MIX-OR-join") {
+                hasResolution = true;
+                break;
+              }
+            }
+            if (hasResolution) break;
+          }
+
+          if (!hasResolution) {
+            lockProcess(proc);
+            console.log(
+              `  PI: Process ${proc.id} LOCKED at vertex ${proc.currentVertex} — ` +
+              `all siblings exited RBS (center ${piCenter}), no resolution join. ` +
+              `Activity interrupted.`
+            );
+            continue;
+          }
+        }
+      }
 
       // Sink check FIRST — before outgoing arcs (sink has no outgoing arcs)
       if (proc.currentVertex === sink) {

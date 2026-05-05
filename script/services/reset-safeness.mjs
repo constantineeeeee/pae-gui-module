@@ -2,13 +2,6 @@
 Service Module for Reset-Safeness Verification
 Developed for RDLT Soundness Verification (2025)
 
-This module verifies reset-safeness of an RDLT model by:
-  1. Extracting all Cyclic-Arc Subgraphs (CAS) using CASExtractor,
-     following the same pipeline as impedance-freeness verification.
-  2. Retaining only MAXIMAL activities (removing strict edge-set subsets).
-  3. For every pair of maximal activities and every Reset-Bound Subsystem (RBS),
-     checking that simultaneous traversal of the RBS always exits via its
-     out-bridge at the same timestep.
 
 Also exports checkInterruptingActivities, which performs the same reset-safeness
 pair check over PAE-generated activity profiles.
