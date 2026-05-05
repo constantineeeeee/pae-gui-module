@@ -388,6 +388,7 @@ export function generateTraversalTreeFromJSON(
             }
 
             let mergedNodesThisIteration = new Set();
+            let spawnedMixOrIndependent = false; // ensure single MIX-OR clone
 
             for (let pair of validCombinations) {
               const joinType = joinTypes.get(joinV);
@@ -448,31 +449,47 @@ export function generateTraversalTreeFromJSON(
                 let nodeC = pair.find((n) => n.triggerC !== EPS);
 
                 if (nodeEps && nodeC) {
-                  // MIX joins produce TWO outputs sharing the SAME pair of
-                  // placeholders (one per parent), exactly like OR-joins do.
-                  // The two outputs differ in their merged state:
-                  //   • MIX-AND merged: both arcs converge → S(..., (ε, c))
-                  //   • MIX-OR independent: only Σ arc → S(..., c)
-                  // Both labeled outputs hang off the SAME (ε-parent → ph)
-                  // and (Σ-parent → ph) placeholders, sharing one sync bar.
-
-                  // Create one placeholder per parent, sharing the joinV's group id
+                  // MIX-AND merged path: ε waited for Σ; both fire together at
+                  // this i-step. Per the manuscript, the merged S-encoding
+                  // takes the ε-branch's prefix (the activity that was carried
+                  // along) and replaces its last element with the synchronized
+                  // pair (ε, c). This preserves each ε-branch's distinct
+                  // ancestry instead of collapsing all merge variants onto the
+                  // Σ-branch's prefix.
+                  //
+                  //   ε branch S = [..., last]   →   merged = [..., (ε, c)]
+                  //
+                  // Example with Path B reaching x6 via x4 (S=[0,b,ε,ε,ε])
+                  // merging with Path A's f-arc (S=[0,a,ε,ε,ε,f]):
+                  //   merged S = [0,b,ε,ε,(ε,f)]   ✓ keeps Path B's ancestry
+                  //
+                  // The placeholders are shared between the merged output and
+                  // the MIX-OR independent so the renderer draws ONE sync bar
+                  // for both at this join vertex.
                   const phPair = insertJoinPlaceholders(pair, joinV);
                   const phEps  = phPair[pair.indexOf(nodeEps)];
                   const phC    = phPair[pair.indexOf(nodeC)];
 
-                  // MIX-AND merged: both placeholders are parents of the merged node
+                  // MIX-AND merged: ε branch's prefix + (ε, c) at the merge step
+                  const epsBasePrefix = nodeEps.S.slice(0, -1);
                   let mixAndChoices = { ...mergedChoices, [joinV]: "AND" };
                   createMergedNode(
                     [phEps, phC],
                     joinV,
-                    [...basePrefix, `(${EPS},${nodeC.triggerC})`],
+                    [...epsBasePrefix, `(${EPS},${nodeC.triggerC})`],
                     mixAndChoices
                   );
 
-                  // MIX-OR independent: only the Σ-arc placeholder is its parent
-                  let mixOrChoices = { ...nodeC.choices, [joinV]: "OR" };
-                  createMergedNode([phC], joinV, [...nodeC.S], mixOrChoices);
+                  // MIX-OR independent path: Σ arc passes through alone. This
+                  // is ONE activity choice regardless of how many ε partners
+                  // exist — produce it only once across all merge variants
+                  // at this join. Without this guard, a MIX-join with N
+                  // ε partners would emit N identical Σ-only paths.
+                  if (!spawnedMixOrIndependent) {
+                    let mixOrChoices = { ...nodeC.choices, [joinV]: "OR" };
+                    createMergedNode([phC], joinV, [...nodeC.S], mixOrChoices);
+                    spawnedMixOrIndependent = true;
+                  }
                 }
               }
               for (let n of pair) mergedNodesThisIteration.add(n);
@@ -591,16 +608,23 @@ export function generateTraversalTreeFromJSON(
     maximalPaths.push(maxNode);
   }
 
+  // Dedup by (S, vertex path): two leaves with the same S but different
+  // vertex paths through the graph are DISTINCT activities (e.g. an
+  // OR-subgroup at an AND-join produces two paths with identical S encoding
+  // but going through different vertices). Only true duplicates (same S AND
+  // same path) collapse.
   let uniqueMaximalPaths = new Map();
   maximalPaths.forEach((n) => {
     const sString = n.S.join(",");
-    if (!uniqueMaximalPaths.has(sString)) {
-      uniqueMaximalPaths.set(sString, n); 
+    const pathString = (n.path ?? []).join(",");
+    const key = `${sString}::${pathString}`;
+    if (!uniqueMaximalPaths.has(key)) {
+      uniqueMaximalPaths.set(key, n);
     }
   });
 
-  uniqueMaximalPaths.forEach((node, pathS) => {
-    console.log(`S([${pathS}])`);
+  uniqueMaximalPaths.forEach((node) => {
+    console.log(`S([${node.S.join(",")}]) path=[${(node.path ?? []).join(",")}]`);
   });
 
   // --- PHASE 5: MAP DAG CAREFULLY TO FIX THE 'TIME' BUG ---
@@ -628,13 +652,58 @@ export function generateTraversalTreeFromJSON(
 
   // Purge dead nodes
   allNodes = allNodes.filter((n) => survivingNodes.has(n.id));
-  
-  // Re-link surviving edges and strictly assign time based on string length
+
+  // Re-link surviving edges
   allNodes.forEach((n) => {
     n.parents = n.parents.filter((p) => survivingEdges.has(`${p.id}->${n.id}`));
     n.children = n.children.filter((c) => survivingEdges.has(`${n.id}->${c.id}`));
-    n.time = n.S.length - 1; // <--- Perfectly sets X-axis placement safely!
   });
+
+  // ── Time assignment (Algorithm 1 lines 24–25) ────────────────────────────
+  // Per the manuscript, time `t` at a merge equals max-T across joining
+  // branches. For non-merge nodes, time is parent's time + 1 (one i-step
+  // forward). Compute via topological pass: arc-firings (nodes with a
+  // triggerEdge) advance the clock by one; placeholders, merge nodes, and
+  // MIX-OR/MIX-AND result nodes are synthetic and inherit the parent's
+  // time without incrementing.
+
+  // Topological order via Kahn's algorithm
+  const indeg = new Map();
+  for (const n of allNodes) indeg.set(n.id, n.parents.length);
+  const ready = allNodes.filter((n) => (indeg.get(n.id) ?? 0) === 0);
+  const order = [];
+  while (ready.length) {
+    const n = ready.shift();
+    order.push(n);
+    for (const c of n.children) {
+      indeg.set(c.id, (indeg.get(c.id) ?? 1) - 1);
+      if (indeg.get(c.id) === 0) ready.push(c);
+    }
+  }
+
+  for (const n of order) {
+    if (n.parents.length === 0) {
+      n.time = 0;
+      continue;
+    }
+    const parentMaxTime = Math.max(...n.parents.map((p) => p.time ?? 0));
+
+    // A node represents a true arc firing only when it has a triggerEdge —
+    // i.e., it was created by a forward-traversal step. Placeholders, merge
+    // nodes, and MIX-OR/MIX-AND result nodes have triggerEdge === null;
+    // they are synthetic markers that sit AT the join i-step, not a step
+    // beyond it. This matches the manuscript's line 24-25 max-T rule:
+    // joining/merging happens AT the max parent time, not after.
+    const isArcFiring = n.triggerEdge !== null && n.triggerEdge !== undefined;
+
+    if (isArcFiring) {
+      // Normal forward step: one i-step beyond the parent.
+      n.time = parentMaxTime + 1;
+    } else {
+      // Placeholder, merge, or MIX-OR/MIX-AND result — sits at parent time.
+      n.time = parentMaxTime;
+    }
+  }
 
   return {
     allNodes: allNodes,

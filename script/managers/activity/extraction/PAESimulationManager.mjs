@@ -144,6 +144,27 @@ export class PAESimulationManager {
     }
 
     /**
+     * True when the result is parallel BUT some additional processes were
+     * impeded (by competition or process interruption) and are shown as a
+     * separate group alongside the parallel activities.
+     */
+    get hasImpededGroup() {
+        if (!this.isParallel) return false;
+        return this.#processEntries.some(e => e.isImpeded === true);
+    }
+
+    /**
+     * The groupIndex assigned to the impeded processes, or -1 if none.
+     * Callers can use this to distinguish the impeded group from the
+     * parallel groups when rendering activity profiles.
+     */
+    get impededGroupIndex() {
+        if (!this.hasImpededGroup) return -1;
+        const entry = this.#processEntries.find(e => e.isImpeded === true);
+        return entry?.groupIndex ?? -1;
+    }
+
+    /**
      * True when PAE returned null (deadlock) or found no done processes.
      * @returns {boolean}
      */
@@ -261,6 +282,28 @@ export class PAESimulationManager {
                     "but they do not satisfy all conditions for parallelism " +
                     "(same input/output vertices, no process interruptions, " +
                     "no competing activities, simultaneous completion).",
+            };
+        }
+
+        // Check if there are also impeded processes alongside the parallel set
+        const impededGroupIndex = this.#result?.parallelActivitySets?.length ?? 0;
+        const impededEntries = this.#processEntries.filter(e => e.groupIndex === impededGroupIndex && e.isImpeded);
+        const hasImpeded = impededEntries.length > 0;
+
+        if (hasImpeded) {
+            const competitionInImpeded = (this.#result?.competitionLog ?? []).length > 0;
+            const interruptionInImpeded = (this.#result?.interruptionLog ?? []).length > 0;
+            const reasons = [];
+            if (competitionInImpeded) reasons.push("competing processes");
+            if (interruptionInImpeded) reasons.push("process interruption");
+            const reasonStr = reasons.length > 0 ? reasons.join(" and ") : "impedance";
+            return {
+                pass:        true,
+                title:       `${this.groupCount} set(s) of parallel maximal activities found — ${impededEntries.length} impeded`,
+                description:
+                    `${this.groupCount} set(s) of parallel maximal activities were successfully extracted. ` +
+                    `However, ${impededEntries.length} additional process(es) could not complete due to ${reasonStr}. ` +
+                    `The impeded activities are shown separately below with the arc(s) at which they were stopped highlighted in red.`,
             };
         }
 
@@ -437,18 +480,44 @@ export class PAESimulationManager {
     #flattenResult(result) {
         if (!result) return [];
 
-        // If parallel: use the grouped sets
+        // If parallel: use the grouped sets as the primary output.
+        // ALSO append any impeded processes (those in allProcessResults but
+        // NOT in any parallelActivitySet) as a separate "impeded" group so
+        // the user can see which activities are parallel and which ones were
+        // stopped by competition or process interruption.
         if (result.isParallel && result.parallelActivitySets.length > 0) {
             const entries = [];
+
+            // Group 0..N-1: the actual parallel activity sets
             result.parallelActivitySets.forEach((actSet, groupIndex) => {
                 for (const entry of actSet) {
                     entries.push({
                         processId:       entry.processId,
                         groupIndex,
                         activityProfile: entry.activityProfile,
+                        isImpeded:       false,
                     });
                 }
             });
+
+            // Collect process IDs already in the parallel sets
+            const parallelIds = new Set(entries.map(e => e.processId));
+
+            // Append impeded processes as a distinct group (next groupIndex)
+            const impededGroupIndex = result.parallelActivitySets.length;
+            const impededEntries = (result.allProcessResults ?? []).filter(
+                e => !parallelIds.has(e.processId)
+            );
+
+            for (const entry of impededEntries) {
+                entries.push({
+                    processId:       entry.processId,
+                    groupIndex:      impededGroupIndex,
+                    activityProfile: entry.activityProfile,
+                    isImpeded:       true,
+                });
+            }
+
             return entries;
         }
 
@@ -456,10 +525,11 @@ export class PAESimulationManager {
         // includes both completed AND impeded (locked) processes so the user
         // can see each process's partial profile in the simulation view.
         if (result.allProcessResults?.length > 0) {
-            return result.allProcessResults.map((entry, idx) => ({
+            return result.allProcessResults.map((entry) => ({
                 processId:       entry.processId,
                 groupIndex:      0,
                 activityProfile: entry.activityProfile,
+                isImpeded:       false,
             }));
         }
 
@@ -472,6 +542,7 @@ export class PAESimulationManager {
                     processId:       entry.processId,
                     groupIndex,
                     activityProfile: entry.activityProfile,
+                    isImpeded:       false,
                 });
             }
         });

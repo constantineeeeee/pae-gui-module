@@ -3,6 +3,7 @@ import { verifyWellHandledness } from "../../services/well-handledness.mjs";
 import { verifySoundness } from "../../services/soundness/soundness-service.mjs";
 import { verifyImpedanceFreeness } from "../../services/impedance-freeness.mjs";
 import { verifyResetSafeness } from "../../services/reset-safeness.mjs";
+import { verifyClassicalSoundness } from "../../services/classical-soundness.mjs";
 import { Form } from "../../utils.mjs";
 import ModelContext from "../model/ModelContext.mjs";
 
@@ -186,7 +187,7 @@ export default class VerificationsPanelManager {
     });
   }
 
-  #initializeSoundnessSection() {
+    #initializeSoundnessSection() {
     const sectionRoot = this.#rootElement.querySelector(
       "[data-section-id='soundness']",
     );
@@ -203,7 +204,15 @@ export default class VerificationsPanelManager {
       const modelSnapshot = this.context.managers.visualModel.makeCopy();
       const simpleModel = modelSnapshot.toSimpleModel();
 
-      const result = verifySoundness(simpleModel, source, sink, notion);
+      // Note: `let` (not `const`) so we can assign in either branch
+      // and read it at the call below. Avoid `if (...) { const result = ... }`
+      // — that scopes `result` only to the if-block.
+      let result;
+      if (notion === "classical-lite") {
+        result = verifyClassicalSoundness(simpleModel, source, sink);
+      } else {
+        result = verifySoundness(simpleModel, source, sink, notion);
+      }
 
       this.context.managers.workspace.showVerificationResults(
         result,

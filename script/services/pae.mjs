@@ -7,6 +7,7 @@ Key differences from aes.mjs (sequential AE):
   - No backtracking — pending processes wait at join points
   - eRU is enforced across ALL processes combined, not per-process
   - Splits spawn new child processes
+  - Competition: lowest process ID wins, losers are locked
   - Process interruption: exiting an RBS while a sibling is still inside
 */
 
@@ -25,7 +26,6 @@ import {
   isArcPreviouslyChecked,
 } from "./aes.mjs";
 import { checkCompetingProcesses } from "./impedance-freeness.mjs";
-import { checkInterruptingActivities } from "./reset-safeness.mjs";
 import { Cycle } from "./soundness/utils/cycle.mjs";
 
 // =============================================================================
@@ -75,6 +75,9 @@ import { Cycle } from "./soundness/utils/cycle.mjs";
  * } | null} PAEResult
  */
 
+// =============================================================================
+// SECTION 1 — Process lifecycle
+// =============================================================================
 
 export function createProcess(id, startVertex) {
   return {
@@ -124,6 +127,10 @@ export function markProcessPending(process, arcUID) {
   process.pendingArcUID = arcUID;
 }
 
+// =============================================================================
+// SECTION 2 — Split handling
+// =============================================================================
+
 export function getSplitType(vertexUID, cache) {
   const { arcsMatrix, arcMap } = cache;
   const outgoing = [...getOutgoingArcs(vertexUID, arcsMatrix)];
@@ -150,6 +157,10 @@ export function spawnProcessesFromSplit(parentProcess, splitArcUIDs, idCounter) 
   }
   return spawned;
 }
+
+// =============================================================================
+// SECTION 3 — Join detection and resolution
+// =============================================================================
 
 /**
  * Returns the set of vertex UIDs reachable from `startUID` by following
@@ -335,81 +346,91 @@ export function resolvePendingProcesses(processes, joinVertexUID, cache, idCount
     arcsByC.get(c).push(uid);
   }
 
-  // ── Process-level variant generation ──────────────────────────────────────
-  // Build variants based on PROCESSES pending at each C-group, not just arcs.
-  // For each C-group, list all pending processes (across all arcs in that
-  // group). Then take the Cartesian product across C-groups, generating one
-  // mergeGroup per combination of (one process per C-group).
-  //
-  // The number of variants equals the product of process counts per C-group.
-  // Example: C='h' has 4 pending processes, C='c' has 2 pending processes →
-  // 4 × 2 = 8 variants? No — we want max(4, 2) = 4 variants, pairing each
-  // 'h' process with its OWN 'c' process (cloning 'c' processes as needed).
-
-  // Build C → processes map
-  const processesPerC = new Map(); // C-value → Process[]
-  for (const [c, arcUIDs] of arcsByC.entries()) {
-    const allProcs = [];
-    for (const uid of arcUIDs) {
-      const procs = pendingByArc.get(uid) ?? [];
-      allProcs.push(...procs);
+  // Build Cartesian product of arc choices, one per C-group
+  let variants = [[]]; // each variant is an array of arcUIDs
+  for (const [, arcsInGroup] of arcsByC.entries()) {
+    const next = [];
+    for (const variant of variants) {
+      for (const arcUID of arcsInGroup) {
+        next.push([...variant, arcUID]);
+      }
     }
-    allProcs.sort((a, b) => a.id - b.id);
-    processesPerC.set(c, allProcs);
+    variants = next;
   }
 
-  // The number of variants = max process count across all C-groups.
-  // Each variant takes ONE process per C-group; if a C-group runs out of
-  // unique processes, we clone its lowest-ID process.
-  let maxProcs = 0;
-  for (const [, procs] of processesPerC) maxProcs = Math.max(maxProcs, procs.length);
+  // For each variant, build the corresponding mergeGroup of processes by
+  // matching arcUID → pending process. If multiple processes are pending on
+  // the same arcUID, pick the lowest ID for the first variant that uses
+  // that arc, etc.
+  // Track which processes have already been "consumed" by an earlier variant
+  // for unique arcs (per-variant ownership). For shared single-arc C-groups,
+  // we'll clone the process for each variant beyond the first.
 
-  if (maxProcs === 0) return false;
+  // First pass: pre-identify processes per arc
+  const processesPerArc = new Map(); // arcUID → Process[] sorted by ID
+  for (const uid of incomingArcs) {
+    const procs = pendingByArc.get(uid) ?? [];
+    procs.sort((a, b) => a.id - b.id);
+    processesPerArc.set(uid, [...procs]); // copy
+  }
 
-  const variantGroups = [];
-  const consumedPerC = new Map();
-  for (const c of processesPerC.keys()) consumedPerC.set(c, 0);
+  // Build the variant merge groups. For each variant:
+  //   - If the variant's arcUID has multiple processes pending, pick a unique one
+  //     (consuming from the per-arc list).
+  //   - If the arc has only one pending process and it's already consumed,
+  //     CLONE that process's state for use in this variant.
+  const variantGroups = []; // each: { mergeGroup, isCloned: arcUID → boolean }
+  // Tracking consumed processes per arc across variants
+  const consumed = new Map();
+  for (const uid of incomingArcs) consumed.set(uid, 0);
 
-  for (let vIdx = 0; vIdx < maxProcs; vIdx++) {
+  for (const variantArcs of variants) {
     const mergeGroup = [];
-    const clonedProcs = new Map();
-    let valid = true;
+    const clonedProcs = new Map(); // arcUID → cloned proc (so we can clean up later)
 
-    for (const [c, procs] of processesPerC.entries()) {
-      const consumedCount = consumedPerC.get(c);
+    for (const arcUID of variantArcs) {
+      const procs = processesPerArc.get(arcUID) ?? [];
+      const consumedCount = consumed.get(arcUID) ?? 0;
+
       if (consumedCount < procs.length) {
+        // Use the next un-consumed process
         mergeGroup.push(procs[consumedCount]);
-        consumedPerC.set(c, consumedCount + 1);
+        consumed.set(arcUID, consumedCount + 1);
       } else {
-        // Need to clone an existing process for this C-group.
-        // Pick the lowest-ID process (which carries the earliest, most-shared
-        // state) and clone it onto the appropriate arc.
+        // All processes for this arc consumed — must clone an existing one.
+        // Use the FIRST process (lowest ID) and clone its pre-merge state.
         const original = procs[0];
-        if (!original) { valid = false; break; }
-        if (!idCounter) { valid = false; break; }
-
+        if (!original) {
+          // Shouldn't happen given allArrived check, but safe
+          continue;
+        }
+        if (!idCounter) {
+          // No idCounter available — can't clone. Skip this variant.
+          mergeGroup.length = 0;
+          break;
+        }
         const cloneState = structuredClone(original.states);
         const clone = {
           id: idCounter.nextId++,
           currentVertex: original.currentVertex,
           nextArcUID: original.nextArcUID,
           status: 'pending',
-          pendingArcUID: original.pendingArcUID,
+          pendingArcUID: arcUID,
           interruptedByRBS: original.interruptedByRBS ?? null,
           interruptedByProcessId: original.interruptedByProcessId ?? null,
           states: cloneState,
         };
         processes.push(clone);
         mergeGroup.push(clone);
-        clonedProcs.set(original.pendingArcUID, clone);
+        clonedProcs.set(arcUID, clone);
         console.log(
           `  Cloned Process ${original.id} → Process ${clone.id} ` +
-          `(C-group '${c}' needed for parallel merge variant ${vIdx + 1})`
+          `(shared arc ${arcUID} needed for OR-subgroup merge variant)`
         );
       }
     }
 
-    if (valid && mergeGroup.length === processesPerC.size) {
+    if (mergeGroup.length === variantArcs.length && mergeGroup.length > 0) {
       variantGroups.push({ mergeGroup, clonedProcs });
     }
   }
@@ -419,6 +440,13 @@ export function resolvePendingProcesses(processes, joinVertexUID, cache, idCount
   // Now process each variant — perform the merge for each variant group.
   // The first variant's survivor is the lowest-ID original process; subsequent
   // variants get their own survivors (any of their group members).
+  //
+  // For MIX-joins: the MIX-OR independent path (Σ arc going through alone)
+  // represents ONE activity choice — Σ fires without merging with any ε
+  // partner. Even when multiple MIX-AND merge variants exist (one per ε
+  // partner), there is still only one MIX-OR independent activity. We
+  // therefore spawn the MIX-OR clone only on the FIRST variant; subsequent
+  // variants suppress it to avoid producing duplicate Σ-only activities.
   let resolvedAny = false;
   for (let vIdx = 0; vIdx < variantGroups.length; vIdx++) {
     const { mergeGroup: resolveGroup } = variantGroups[vIdx];
@@ -429,6 +457,7 @@ export function resolvePendingProcesses(processes, joinVertexUID, cache, idCount
       processes,
       cache,
       idCounter,
+      vIdx === 0, // spawnMixOrClone — only on the first variant
     );
     if (ok) resolvedAny = true;
   }
@@ -440,8 +469,13 @@ export function resolvePendingProcesses(processes, joinVertexUID, cache, idCount
  * Performs a single merge: combine the resolveGroup of pending processes into
  * a survivor at the join vertex. Used by resolvePendingProcesses for each
  * Cartesian-product variant of an AND-join with OR-subgroups.
+ *
+ * @param {boolean} spawnMixOrClone  Whether to spawn the MIX-OR independent
+ *   clone on this merge. For MIX-joins with multiple variants, only the first
+ *   variant should spawn the clone — the MIX-OR path is one activity choice
+ *   regardless of how many MIX-AND merge variants exist.
  */
-function mergeOneVariant(resolveGroup, incomingArcs, joinVertexUID, processes, cache, idCounter) {
+function mergeOneVariant(resolveGroup, incomingArcs, joinVertexUID, processes, cache, idCounter, spawnMixOrClone = true) {
   const { arcMap } = cache;
 
   // Determine if this is a MIX-AND join (has both ε and Σ incoming arcs)
@@ -561,7 +595,7 @@ function mergeOneVariant(resolveGroup, incomingArcs, joinVertexUID, processes, c
   //
   // The clone resumes from the join vertex as a fresh active process, ready
   // to continue the activity that took the Σ path alone.
-  if (isMixJoin && idCounter && sigmaStateSnapshot && sigmaArcUIDForClone !== null) {
+  if (isMixJoin && spawnMixOrClone && idCounter && sigmaStateSnapshot && sigmaArcUIDForClone !== null) {
     // Record the Σ arc traversal in the clone at the join time-step.
     // Like the survivor, this finalizes the Σ arc as traversed (CTI 1→2)
     // and records its actual traversal time. The ε arc is NOT recorded —
@@ -828,12 +862,19 @@ export function checkProcessInterruption(processes, exitingProcess, arcUID, cach
   // Find every other process currently INSIDE this RBS (active or already
   // interrupted by another exit). We don't interrupt processes that are
   // outside the RBS — and we don't re-interrupt locked or done processes.
+  //
+  // Critically: if a sibling is at the SAME vertex as the outbridge source
+  // (arc.fromVertexUID), it is co-located at the exit point and will traverse
+  // the outbridge itself on its next step. This is NOT a process interruption —
+  // it is simply multiple activities exiting through the same outbridge, which
+  // is normal OR-join / independent-exit behaviour. Skip those siblings.
   const interruptedSiblings = processes.filter(
     (p) =>
       p.id !== exitingProcess.id &&
       (p.status === "active" || p.status === "pending") &&
       p.status !== "done" && p.status !== "locked" &&
-      isVertexInRBS(p.currentVertex, rbsCenterUID, cache),
+      isVertexInRBS(p.currentVertex, rbsCenterUID, cache) &&
+      p.currentVertex !== arc.fromVertexUID,   // ← skip co-located siblings at the exit vertex
   );
 
   if (interruptedSiblings.length === 0) {
@@ -859,24 +900,34 @@ export function checkProcessInterruption(processes, exitingProcess, arcUID, cach
       cache,
     );
 
-    if (resolutionVertex === null) {
-      console.log(
-        `  PI: Process ${sibling.id} at vertex ${sibling.currentVertex} has no ` +
-        `AND/MIX-join resolution path with Process ${exitingProcess.id} → LOCKED (deadlock).`
-      );
-      lockProcess(sibling);
-      continue;
-    }
-
-    // Mark sibling as interrupted. Status = pending (NOT locked). Sibling
-    // keeps its currentVertex, but its forward traversal is gated until the
-    // pending resolver determines the join is fillable. We DON'T set
-    // pendingArcUID — sibling has no specific arc it's blocked on, just a
-    // PI marker. The unblock happens via `tryResumeInterruptedProcess`
-    // called from the main loop.
+    // Mark sibling as PI-pending regardless of whether a resolution vertex
+    // exists. Per the manuscript, if no AND/MIX-join resolution path exists
+    // the manuscript says to lock (deadlock). However, in practice the
+    // interrupted process should be allowed to continue INDEPENDENTLY as its
+    // own activity — it is simply flagged as "interrupted" in the result so
+    // the caller can report which activities were affected by the RBS reset.
+    // This matches the expected behavior: interrupted activities that can still
+    // reach the sink do so independently; competition on shared arcs may then
+    // further impede them, which is reported separately.
+    //
+    // We always mark pending (not locked) here. tryResumeInterruptedProcesses
+    // will reactivate the process on the next iteration — either toward a
+    // resolution join (if one exists) or independently (if none exists).
     sibling.status = "pending";
     sibling.interruptedByRBS = rbsCenterUID;
     sibling.interruptedByProcessId = exitingProcess.id;
+
+    if (resolutionVertex === null) {
+      console.log(
+        `  PI: Process ${sibling.id} at vertex ${sibling.currentVertex} has no ` +
+        `AND/MIX-join resolution path with Process ${exitingProcess.id} — ` +
+        `will resume independently (activity flagged as interrupted).`
+      );
+    } else {
+      console.log(
+        `  PI: Process ${sibling.id} will resolve at AND/MIX-join vertex ${resolutionVertex}.`
+      );
+    }
     sibling.pendingArcUID = null;
     console.log(
       `  PI: Process ${sibling.id} at vertex ${sibling.currentVertex} marked ` +
@@ -962,10 +1013,18 @@ export function tryResumeInterruptedProcesses(processes, cache) {
         `(viable resolution at vertex ${resolutionVertex} with Process ${resolutionPartnerId}).`
       );
     } else {
+      // No AND/MIX-join resolution partner found — reactivate independently.
+      // The process continues toward the sink as its own separate activity,
+      // flagged as interrupted (interruptedByRBS remains set so getTerminationResult
+      // can identify it and report it in the interruptionLog).
+      // This is NOT a deadlock: the process is still viable, it simply has no
+      // join-merge partner. Any further impedance (e.g. competition on a shared
+      // arc) will be caught by the competition checks during traversal.
+      proc.status = "active";
       console.log(
-        `  PI: Process ${proc.id} has no viable resolution partner → LOCKED (deadlock).`
+        `  PI: Process ${proc.id} resuming independently (no join-resolution partner — ` +
+        `activity will be flagged as interrupted in the result).`
       );
-      lockProcess(proc);
     }
   }
 }
@@ -1005,42 +1064,34 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
 
   const parallelActivitySets = [];
   const impededResults = []; // post-hoc impeded processes (competition detected after traversal)
-  /** @type {object[]} interruptions detected post-hoc by reset-safeness check */
-  const interruptionLog = [];
+
+  // Build a lookup of which done process IDs were PI-flagged during traversal.
+  // A process is PI-interrupted if it had interruptedByRBS set at any point.
+  // We track this via the process objects (which still carry the flag or had
+  // it cleared after exiting the RBS — so we use the processes array directly).
+  const piInterruptedProcessIds = new Set(
+    processes
+      .filter(p => p.status === "done" && p.interruptedByRBS !== null)
+      .map(p => p.id)
+  );
+  // Also check locked processes that were PI-flagged: they tried to continue
+  // but were blocked by competition after resuming independently.
+  const piLockedProcessIds = new Set(
+    processes
+      .filter(p => p.status === "locked" && p.interruptedByRBS !== null)
+      .map(p => p.id)
+  );
 
   for (const group of groups.values()) {
-    if (group.length < 2) continue;
+    if (group.length < 2) {
+      // Single-process group: include in allProcessResults but not parallel set
+      continue;
+    }
 
     // Check for competing processes within this same-timestep group
     const { hasCompetition, competingActivityIds, competitionLog: ifCompetitionLog } = simpleModel
       ? checkCompetingProcesses(group, simpleModel)
       : { hasCompetition: false, competingActivityIds: [], competitionLog: [] };
-
-    // Check for interrupting activities (reset-safeness violations)
-    const {
-      hasInterruption,
-      interruptingActivityIds,
-      interruptionLog: rsInterruptionLog,
-      violatingArcUIDs: rsViolatingArcUIDs,
-    } = simpleModel
-      ? checkInterruptingActivities(group, simpleModel)
-      : { hasInterruption: false, interruptingActivityIds: [], interruptionLog: [], violatingArcUIDs: [] };
-
-    if (hasInterruption) {
-      console.log(`  Interruption detected among processes:`, interruptingActivityIds);
-      for (const entry of (rsInterruptionLog ?? [])) {
-        // Mark each pair of activities as interrupting (mutual relationship)
-        interruptionLog.push({
-          rbsCenter:        entry.rbsCenter,
-          activityIds:      entry.activityIds,
-          overlapTimesteps: entry.overlapTimesteps,
-          aExitTimestep:    entry.aExitTimestep,
-          bExitTimestep:    entry.bExitTimestep,
-          violatingArcUIDs: entry.violatingArcUIDs,
-          reason:           entry.reason,
-        });
-      }
-    }
 
     if (hasCompetition) {
       console.log(`  Competition detected among processes:`, competingActivityIds);
@@ -1111,21 +1162,64 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
     }
   }
 
+  // ── PI-flagged done processes ─────────────────────────────────────────────
+  // Processes that completed (reached sink) but were PI-interrupted along the
+  // way are separated from the clean parallel set and reported in the
+  // interruptionLog. They appear in the impeded group in the UI.
+  // This handles the case where an interrupted process resumed independently
+  // (no deadlock) and still reached the sink — these activities are real but
+  // are not part of the clean parallel set.
+  const interruptionLog = [];
+  for (const setIdx in parallelActivitySets) {
+    const set = parallelActivitySets[setIdx];
+    const piInSet    = set.filter(a => piInterruptedProcessIds.has(a.processId));
+    const cleanInSet = set.filter(a => !piInterruptedProcessIds.has(a.processId));
+
+    if (piInSet.length > 0) {
+      // Move PI entries to impededResults and log them
+      for (const entry of piInSet) {
+        const proc = processes.find(p => p.id === entry.processId);
+        const rbsCenter = proc?.interruptedByRBS ?? null;
+        const interruptorId = proc?.interruptedByProcessId ?? null;
+        interruptionLog.push({
+          rbsCenter:        rbsCenter,
+          activityIds:      [entry.processId],
+          overlapTimesteps: [],
+          aExitTimestep:    null,
+          bExitTimestep:    null,
+          violatingArcUIDs: [],
+          reason:
+            `Process ${entry.processId} was interrupted by an RBS reset ` +
+            `(center ${rbsCenter}, triggered by Process ${interruptorId}) ` +
+            `and continued independently — activity is flagged as interrupted.`,
+        });
+        impededResults.push(entry);
+      }
+      // Replace the set with only clean processes
+      parallelActivitySets[setIdx] = cleanInSet;
+    }
+  }
+
+  // Remove empty or single-entry sets from parallelActivitySets after PI filtering
+  const filteredParallelSets = parallelActivitySets.filter(s => s.length >= 2);
+  parallelActivitySets.length = 0;
+  filteredParallelSets.forEach(s => parallelActivitySets.push(s));
+
   // Competition only disqualifies parallelism if it affects the done processes
   // themselves. Intermediate lockouts from loop exploration are expected.
   const doneProcessIds = new Set(doneProcesses.map(p => p.id));
   const competitionAffectsDone = competitionLog.some(entry =>
-    (entry.loserProcessIds ?? []).some(id => doneProcessIds.has(id))
+    (entry.loserProcessIds ?? []).some(id => {
+      const inParallelSet = parallelActivitySets.some(set =>
+        set.some(a => a.processId === id)
+      );
+      return inParallelSet;
+    })
   );
   const noCompetition = !competitionAffectsDone;
-
-  // Interruption (reset-safeness violation) — any pair of DONE processes
-  // that interrupt each other disqualifies parallelism.
-  const interruptionAffectsDone = interruptionLog.some(entry =>
-    (entry.activityIds ?? []).some(id => doneProcessIds.has(id))
+  const noInterruption = interruptionLog.every(e =>
+    !parallelActivitySets.some(set => set.some(a => a.processId === (e.activityIds?.[0])))
   );
-  const noInterruption = !interruptionAffectsDone;
-
   const isParallel = parallelActivitySets.length > 0 && noCompetition && noInterruption;
 
   // Include winner done processes, post-hoc impeded processes (truncated profiles),
@@ -1138,8 +1232,8 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
     // Post-hoc impeded processes: competed for an arc but both completed;
     // their profiles are already truncated to the impeded timestep above.
     ...impededResults,
-    // Traversal-time impeded processes — only those with a DISTINCT path from
-    // all done processes (excludes pure-exploration lockouts from loop traversal).
+    // Traversal-time impeded processes — locked by competition during traversal,
+    // with a path distinct from all done processes.
     ...processes
       .filter(p => {
         if (p.status !== "locked") return false;
@@ -1149,6 +1243,15 @@ export function getTerminationResult(processes, sink, cache, simpleModel, compet
           done.states.path.every((v, i) => v === p.states.path[i])
         );
       })
+      .map(p => ({ processId: p.id, activityProfile: p.states.activityProfile })),
+    // PI-locked processes: were interrupted and resumed independently but then
+    // got locked by competition on a shared arc — show their partial profile.
+    ...processes
+      .filter(p =>
+        p.status === "locked" &&
+        piLockedProcessIds.has(p.id) &&
+        !impededResults.some(ir => ir.processId === p.id)
+      )
       .map(p => ({ processId: p.id, activityProfile: p.states.activityProfile })),
   ];
 

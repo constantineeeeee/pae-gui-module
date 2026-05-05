@@ -11,6 +11,21 @@ import { ASProfilePanelManager } from "./panels/ASProfilePanelManager.mjs";
 import { ASTORPanelManager } from "./panels/ASTORPanelManager.mjs";
 import { buildElement } from "../../../utils.mjs";
 
+// ── Shared activity color palette ─────────────────────────────────────────
+// MUST match ACTIVITY_COLORS in TraversalTreeSubworkspaceManager.mjs exactly
+// so that arc highlights in the main model correspond 1:1 to the path colors
+// rendered in the traversal tree view.
+const ACTIVITY_COLORS = [
+    "#3a81de", // blue   — Activity 1
+    "#4caf50", // green  — Activity 2
+    "#ff9800", // orange — Activity 3
+    "#9c27b0", // purple — Activity 4
+    "#e91e63", // pink
+    "#00bcd4", // cyan
+    "#795548", // brown
+    "#607d8b", // blue-grey
+];
+
 export class ActivitySimulationManager {
     /** @type {ModelContext} */
     context;
@@ -143,7 +158,7 @@ export class ActivitySimulationManager {
             const profilePanelMain = rootElement.querySelector(".panel[data-panel-id='profile'] main");
             profilePanelMain.innerHTML = "";
 
-            const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
+            const colors = ACTIVITY_COLORS;
 
             this.#activities.forEach((activity, i) => {
                 const color = colors[i % colors.length];
@@ -328,7 +343,7 @@ export class ActivitySimulationManager {
 
         if (this.#isParallel) {
             this.#resetHighlightButtons();
-            const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
+            const colors = ACTIVITY_COLORS;
             this.#activities.forEach((activity, i) => {
                 const color = colors[i % colors.length];
                 const arcs = activity.profile[timestep] ?? new Set();
@@ -375,7 +390,7 @@ export class ActivitySimulationManager {
             this.#drawingManager.highlightArc(arcUID, "#f39c12");
         }
 
-        const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
+        const colors = ACTIVITY_COLORS;
 
         // Clear all active row highlights across every process table first
         this.#parallelPanels.forEach(panel => {
@@ -418,7 +433,7 @@ export class ActivitySimulationManager {
             this.#drawingManager.highlightArc(arcUID, "#f39c12");
         }
 
-        const colors = ["#3a81de", "#4caf50", "#ff9800", "#9c27b0"];
+        const colors = ACTIVITY_COLORS;
 
         // Clear active rows and update button states across all process panels
         this.#parallelPanels.forEach((panel, idx) => {
