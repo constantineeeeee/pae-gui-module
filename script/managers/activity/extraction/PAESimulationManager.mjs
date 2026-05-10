@@ -130,7 +130,22 @@ export class PAESimulationManager {
 
         // Flatten the result into a display-friendly list
         this.#processEntries = this.#flattenResult(this.#result);
-        ProcessColorRegistry.registerFromEntries(this.#processEntries);
+
+        // Enrich each entry with an `arcKeys` Set of "fromIdent->toIdent"
+        // strings derived from the activityProfile, so the traversal-tree
+        // renderer can match each NTT branch to the right PAE process by
+        // arc-content equality (NTT has no direct knowledge of processIds).
+        const enriched = this.#processEntries.map((e) => {
+            const arcKeys = new Set();
+            for (const ts in e.activityProfile) {
+                for (const arcUID of e.activityProfile[ts]) {
+                    const [from, to] = this.getArcIdentifierPair(arcUID);
+                    if (from && to) arcKeys.add(`${from}->${to}`);
+                }
+            }
+            return { ...e, arcKeys };
+        });
+        ProcessColorRegistry.registerFromEntries(enriched);
 
     }
     /**
@@ -438,6 +453,9 @@ export class PAESimulationManager {
                 conclusion,
                 profile:        entry.activityProfile,
                 tor:            {},                 // PAE does not compute TOR per-process
+                paeProcessId:   entry.processId,    // for ProcessColorRegistry lookup so
+                                                     // the activity profile UI and the
+                                                     // traversal-tree share colors
             });
 
             this.context.managers.activities.addActivity(activity);

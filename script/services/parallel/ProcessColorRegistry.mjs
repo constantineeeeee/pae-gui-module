@@ -15,6 +15,8 @@ const _byProcessId = new Map();
 const _byPathIndex = new Map();
 /** @type {string[]} ordered list, one per registered process */
 const _orderedColors = [];
+/** @type {Set<string>[]} per-pathIndex arc-key set for content matching */
+const _arcKeysByPathIdx = [];
 
 const ProcessColorRegistry = {
 
@@ -23,33 +25,84 @@ const ProcessColorRegistry = {
    * Non-impeded processes are registered first so path indices match
    * the order res.maximalPaths is built in the traversal tree.
    *
-   * @param {{ processId: number, isImpeded?: boolean }[]} entries
+   * Each entry MAY include an `arcKeys` Set (strings of the form
+   * "fromIdentifier->toIdentifier") describing the arcs the process
+   * traversed; this enables content-based matching from the traversal
+   * tree (which has no direct knowledge of PAE process IDs) via
+   * `getColorByArcKeys()`.
+   *
+   * @param {{ processId: number, isImpeded?: boolean, arcKeys?: Set<string> }[]} entries
    */
   registerFromEntries(entries) {
     this.clear();
 
-    const nonImpeded = entries.filter(e => !e.isImpeded);
-    const impeded    = entries.filter(e =>  e.isImpeded);
-
-    let idx = 0;
-
-    for (const entry of nonImpeded) {
-      if (_byProcessId.has(entry.processId)) continue;
-      const color = PALETTE[idx % PALETTE.length];
-      _byProcessId.set(entry.processId, color);
-      _byPathIndex.set(_orderedColors.length, color);
-      _orderedColors.push(color);
-      idx++;
+    // Group entries by groupIndex (each parallelActivitySet is a group;
+    // impeded processes form their own trailing group). Colors are then
+    // assigned with a SINGLE global counter that does NOT reset between
+    // groups — so processes across multiple parallel sets always have
+    // distinct colors (e.g. Set 0 → blue/green; Set 1 → orange/purple).
+    // The activity-profile UI (ActivitySimulationManager) reads colors
+    // back via getByProcessId() to stay in sync.
+    const byGroup = new Map();
+    for (const e of entries) {
+      const g = e.groupIndex ?? 0;
+      if (!byGroup.has(g)) byGroup.set(g, []);
+      byGroup.get(g).push(e);
     }
 
-    for (const entry of impeded) {
-      if (_byProcessId.has(entry.processId)) continue;
-      const color = _dim(PALETTE[idx % PALETTE.length]);
-      _byProcessId.set(entry.processId, color);
-      _byPathIndex.set(_orderedColors.length, color);
-      _orderedColors.push(color);
-      idx++;
+    const groupKeys = [...byGroup.keys()].sort((a, b) => a - b);
+
+    let globalIdx = 0;
+
+    for (const g of groupKeys) {
+      const groupEntries = byGroup.get(g);
+      // Within each group: non-impeded first (their pathIndex must align
+      // with the order res.maximalPaths is built), then impeded.
+      const sorted = [
+        ...groupEntries.filter(e => !e.isImpeded),
+        ...groupEntries.filter(e =>  e.isImpeded),
+      ];
+      for (const entry of sorted) {
+        if (_byProcessId.has(entry.processId)) continue;
+        const base  = PALETTE[globalIdx % PALETTE.length];
+        const color = entry.isImpeded ? _dim(base) : base;
+        _byProcessId.set(entry.processId, color);
+        _byPathIndex.set(_orderedColors.length, color);
+        _arcKeysByPathIdx.push(entry.arcKeys instanceof Set ? entry.arcKeys : new Set());
+        _orderedColors.push(color);
+        globalIdx++;
+      }
     }
+  },
+
+  /** True iff at least one process has been registered for this PAE run. */
+  get hasRegistrations() {
+    return _orderedColors.length > 0;
+  },
+
+  /**
+   * Find the registered color whose arc-key set exactly matches the given
+   * set. Used by the traversal-tree renderer to color each NTT branch by
+   * the matching PAE process so the two views stay color-consistent.
+   *
+   * Returns null if no exact match is found (caller should fall back to
+   * the default palette index).
+   *
+   * @param {Set<string>} arcKeys
+   * @returns {string | null}
+   */
+  getColorByArcKeys(arcKeys) {
+    if (!(arcKeys instanceof Set) || arcKeys.size === 0) return null;
+    for (let i = 0; i < _arcKeysByPathIdx.length; i++) {
+      const stored = _arcKeysByPathIdx[i];
+      if (stored.size !== arcKeys.size) continue;
+      let match = true;
+      for (const k of arcKeys) {
+        if (!stored.has(k)) { match = false; break; }
+      }
+      if (match) return _orderedColors[i];
+    }
+    return null;
   },
 
   /** @param {number} processId @returns {string} */
@@ -73,6 +126,7 @@ const ProcessColorRegistry = {
     _byProcessId.clear();
     _byPathIndex.clear();
     _orderedColors.length = 0;
+    _arcKeysByPathIdx.length = 0;
   },
 };
 

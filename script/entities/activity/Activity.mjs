@@ -58,6 +58,11 @@ export default class Activity {
     /** @type {number[]} — process IDs of activities this one interrupts/is interrupted by */
     interruptingActivityIds;
 
+    /** @type {number | null} — PAE process ID this activity was derived from
+     *  (for color-registry lookups so the activity-profile UI and the
+     *  traversal-tree share colors). null for non-PAE activities. */
+    paeProcessId;
+
     /**
      * @param {{ 
      *     id: string, 
@@ -84,5 +89,6 @@ export default class Activity {
         this.competingArcUIDs = values.competingArcUIDs || [];
         this.interruptingArcUIDs    = values.interruptingArcUIDs    ?? [];
         this.interruptingActivityIds= values.interruptingActivityIds ?? [];
+        this.paeProcessId           = values.paeProcessId           ?? null;
     }
 }

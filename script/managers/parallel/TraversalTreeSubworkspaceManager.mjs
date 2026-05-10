@@ -18,6 +18,7 @@ export default class TraversalTreeViewerManager {
   #svg;
   #root;
   #groupColors = null;
+  #pathColorIdx = [];
 
   constructor(context, visualModelSnapshot, groupColors = null) {
     this.context = context;
@@ -140,6 +141,13 @@ export default class TraversalTreeViewerManager {
     }
 
     this.#clearSVG();
+
+    // Resolve a per-pathIndex color INDEX (into the active PATH_COLORS list)
+    // by matching each NTT branch's arc-set against the registered PAE
+    // process arc-sets. Cached on `this` so #renderTree and #renderResults
+    // share the same mapping.
+    this.#pathColorIdx = this.#resolvePathColorIndices(res);
+
     this.#renderResults(res);
     this.#renderTree(res);
   }
@@ -305,6 +313,51 @@ export default class TraversalTreeViewerManager {
       text.textContent = `i=${label}`;
       edgeG.appendChild(text);
     }
+  }
+
+  // ─── PAE ↔ NTT color matching ───────────────────────────────────────────
+  //
+  // Returns an array indexed by maximalPaths position, where each value is
+  // a color INDEX into the active PATH_COLORS list (the same list both
+  // #renderTree and #renderResults derive from ProcessColorRegistry).
+  //
+  // Matching strategy: walk each NTT leaf back through its `parents` to
+  // collect the set of arc identifier strings ("from->to") it traversed,
+  // then ask the registry which registered PAE process has the same arc-
+  // set. If found, use that PAE process's color (so PAE process N's
+  // activity profile and the corresponding NTT branch share a color).
+  // Otherwise fall back to `pathIndex % length`.
+  #resolvePathColorIndices(res) {
+    const PATH_COLORS = ProcessColorRegistry.hasRegistrations
+      ? ProcessColorRegistry.getAllColors()
+      : ["#3a81de","#4caf50","#ff9800","#9c27b0","#e91e63","#00bcd4","#795548","#607d8b"];
+
+    const maxPaths = res.maximalPaths ?? [];
+    return maxPaths.map((leaf, pathIndex) => {
+      // Collect every arc traversed on the way to this leaf — including
+      // arcs from sibling branches that converged via AND/MIX merges,
+      // since `parents` carries them.
+      const arcKeys = new Set();
+      const visited = new Set();
+      const stack = [leaf];
+      while (stack.length) {
+        const n = stack.pop();
+        if (!n || visited.has(n.id)) continue;
+        visited.add(n.id);
+        // triggerEdge is the arc that produced this node ("from->to" using
+        // vertex identifiers — the same form PAE uses via
+        // getArcIdentifierPair). Placeholders carry triggerEdge=null.
+        if (n.triggerEdge) arcKeys.add(n.triggerEdge);
+        for (const p of n.parents ?? []) stack.push(p);
+      }
+
+      const matchedColor = ProcessColorRegistry.getColorByArcKeys(arcKeys);
+      if (matchedColor) {
+        const idx = PATH_COLORS.indexOf(matchedColor);
+        if (idx >= 0) return idx;
+      }
+      return pathIndex % PATH_COLORS.length;
+    });
   }
 
   // ─── Main render ─────────────────────────────────────────────────────────────
@@ -832,8 +885,8 @@ export default class TraversalTreeViewerManager {
             label,
           );
         } else if (pathIndices.length === 1) {
-          // Single-path edge — use that path's color
-          const ci = pathIndices[0] % PATH_COLORS.length;
+          // Single-path edge — use that path's color (PAE-matched index)
+          const ci = this.#pathColorIdx[pathIndices[0]] ?? (pathIndices[0] % PATH_COLORS.length);
           this.#drawEdge(
             edgeGroup,
             from.xOut + 4, from.yMid,
@@ -848,7 +901,7 @@ export default class TraversalTreeViewerManager {
           const N = pathIndices.length;
           const SPREAD = 4; // px offset between stacked lines
           pathIndices.forEach((pi, idx) => {
-            const ci = pi % PATH_COLORS.length;
+            const ci = this.#pathColorIdx[pi] ?? (pi % PATH_COLORS.length);
             // Distribute lines symmetrically around the centerline
             const offset = (idx - (N - 1) / 2) * SPREAD;
             this.#drawEdge(
@@ -910,7 +963,8 @@ export default class TraversalTreeViewerManager {
         "display:flex;flex-direction:column;gap:6px;font-size:12px;";
 
       res.maximalPaths.forEach((b, pathIndex) => {
-        const color = PATH_COLORS[pathIndex % PATH_COLORS.length];
+        const ci = this.#pathColorIdx[pathIndex] ?? (pathIndex % PATH_COLORS.length);
+        const color = PATH_COLORS[ci];
 
         const row = document.createElement("div");
         row.style.cssText =

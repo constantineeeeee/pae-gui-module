@@ -10,11 +10,15 @@ import { ASDetailsPanelManager } from "./panels/ASDetailsPanelManager.mjs";
 import { ASProfilePanelManager } from "./panels/ASProfilePanelManager.mjs";
 import { ASTORPanelManager } from "./panels/ASTORPanelManager.mjs";
 import { buildElement } from "../../../utils.mjs";
+import ProcessColorRegistry from "../../../services/parallel/ProcessColorRegistry.mjs";
 
 // ── Shared activity color palette ─────────────────────────────────────────
-// MUST match ACTIVITY_COLORS in TraversalTreeSubworkspaceManager.mjs exactly
-// so that arc highlights in the main model correspond 1:1 to the path colors
-// rendered in the traversal tree view.
+// Used as a fallback when the ProcessColorRegistry has no registrations
+// (e.g. non-PAE simulations) or the activity has no `paeProcessId`. PAE-
+// origin activities are colored via ProcessColorRegistry so that the
+// activity-profile UI, the in-model arc highlights, and the traversal-tree
+// branches all share the SAME globally-unique color per PAE process —
+// even across multiple parallel sets.
 const ACTIVITY_COLORS = [
     "#3a81de", // blue   — Activity 1
     "#4caf50", // green  — Activity 2
@@ -25,6 +29,21 @@ const ACTIVITY_COLORS = [
     "#795548", // brown
     "#607d8b", // blue-grey
 ];
+
+/**
+ * Resolve the color for the i-th activity in `#activities`.
+ * If the activity carries a `paeProcessId` and ProcessColorRegistry has
+ * a matching registration, that color is returned (so colors stay in
+ * sync with the traversal-tree view). Otherwise falls back to
+ * ACTIVITY_COLORS[i % len].
+ */
+function _activityColor(activity, i) {
+    if (activity?.paeProcessId != null && ProcessColorRegistry.hasRegistrations) {
+        const c = ProcessColorRegistry.getByProcessId(activity.paeProcessId);
+        if (c) return c;
+    }
+    return ACTIVITY_COLORS[i % ACTIVITY_COLORS.length];
+}
 
 export class ActivitySimulationManager {
     /** @type {ModelContext} */
@@ -158,10 +177,8 @@ export class ActivitySimulationManager {
             const profilePanelMain = rootElement.querySelector(".panel[data-panel-id='profile'] main");
             profilePanelMain.innerHTML = "";
 
-            const colors = ACTIVITY_COLORS;
-
             this.#activities.forEach((activity, i) => {
-                const color = colors[i % colors.length];
+                const color = _activityColor(activity, i);
 
                 // Process label row: colored title + "Highlight All" toggle button
                 const labelRow = document.createElement("div");
@@ -343,9 +360,8 @@ export class ActivitySimulationManager {
 
         if (this.#isParallel) {
             this.#resetHighlightButtons();
-            const colors = ACTIVITY_COLORS;
             this.#activities.forEach((activity, i) => {
-                const color = colors[i % colors.length];
+                const color = _activityColor(activity, i);
                 const arcs = activity.profile[timestep] ?? new Set();
                 for (const arcUID of arcs) {
                     this.#drawingManager.highlightArc(arcUID, color);
@@ -390,8 +406,6 @@ export class ActivitySimulationManager {
             this.#drawingManager.highlightArc(arcUID, "#f39c12");
         }
 
-        const colors = ACTIVITY_COLORS;
-
         // Clear all active row highlights across every process table first
         this.#parallelPanels.forEach(panel => {
             Object.values(panel.rowsByTimestep).forEach(r => r.classList.remove("active"));
@@ -399,7 +413,7 @@ export class ActivitySimulationManager {
 
         // Highlight only the clicked process's arcs
         const activity = this.#activities[processIndex];
-        const color = colors[processIndex % colors.length];
+        const color = _activityColor(activity, processIndex);
         const arcs = activity?.profile[timestep] ?? new Set();
         for (const arcUID of arcs) {
             this.#drawingManager.highlightArc(arcUID, color);
@@ -433,8 +447,6 @@ export class ActivitySimulationManager {
             this.#drawingManager.highlightArc(arcUID, "#f39c12");
         }
 
-        const colors = ACTIVITY_COLORS;
-
         // Clear active rows and update button states across all process panels
         this.#parallelPanels.forEach((panel, idx) => {
             Object.values(panel.rowsByTimestep).forEach(r => r.classList.remove("active"));
@@ -446,7 +458,7 @@ export class ActivitySimulationManager {
 
         // Collect every unique arc UID used by this process across all timesteps
         const activity = this.#activities[processIndex];
-        const color = colors[processIndex % colors.length];
+        const color = _activityColor(activity, processIndex);
         const allArcUIDs = new Set();
         for (const arcs of Object.values(activity.profile)) {
             for (const arcUID of arcs) allArcUIDs.add(arcUID);

@@ -50,6 +50,73 @@ function computeSourceSink(vertices, edges) {
   return { source, sink };
 }
 
+/**
+ * Identifies edges that participate in at least one cycle (graph-level).
+ * An arc (u, v) is in a cycle iff `v` can reach `u`. Computed via per-vertex
+ * forward-reachability BFS. Returned as a Set of "from->to" edge keys.
+ *
+ * Mirrors PAE's `cycleEruMap.has(arcUID)` predicate; in NTT we only need
+ * the membership (not eRU), because per-process L-budget already governs
+ * how many times an arc may be traversed.
+ */
+function buildCycleArcs(vertices, edges, out) {
+  const reachFrom = new Map();
+  for (const v of vertices) {
+    const startId = String(v.id);
+    const reachable = new Set();
+    const queue = [startId];
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      const oedges = out.get(cur) || [];
+      for (const e of oedges) {
+        if (!reachable.has(e.to)) {
+          reachable.add(e.to);
+          queue.push(e.to);
+        }
+      }
+    }
+    reachFrom.set(startId, reachable);
+  }
+
+  const cycleArcs = new Set();
+  for (const e of edges) {
+    const from = String(e.from);
+    const to = String(e.to);
+    if (reachFrom.get(to)?.has(from)) {
+      cycleArcs.add(`${from}->${to}`);
+    }
+  }
+  return cycleArcs;
+}
+
+/**
+ * Sorts outgoing edges so loop-continuation arcs (cycle arcs whose L-budget
+ * still permits another traversal for this branch) come first, then non-cycle
+ * arcs, then L-exhausted cycle arcs. Mirrors PAE's `sortArcsLoopFirst`.
+ *
+ * For maximal-activity extraction we want the loop to keep iterating until
+ * the L-attribute is consumed; only then do we yield to non-cycle exits.
+ */
+function sortEdgesLoopFirst(outgoingEdges, edgeVisits, cycleArcs) {
+  const unexhaustedCycle = [];
+  const nonCycle         = [];
+  const exhaustedCycle   = [];
+
+  for (const e of outgoingEdges) {
+    const ek = `${e.from}->${e.to}`;
+    if (!cycleArcs.has(ek)) {
+      nonCycle.push(e);
+      continue;
+    }
+    const traversals = edgeVisits[ek] || 0;
+    const L = e.L !== undefined ? e.L : 1;
+    if (traversals < L) unexhaustedCycle.push(e);
+    else exhaustedCycle.push(e);
+  }
+
+  return [...unexhaustedCycle, ...nonCycle, ...exhaustedCycle];
+}
+
 function classifyJoin(inc) {
   const joinTypes = new Map();
 
@@ -96,6 +163,12 @@ export function generateTraversalTreeFromJSON(
   const { out, inc } = buildAdjacency(input.vertices, input.edges);
 
   const joinTypes = classifyJoin(inc);
+
+  // --- DETECT CYCLE ARCS (graph-level) ---
+  // Used by sortEdgesLoopFirst and the cycle-aware spawn rules below to
+  // prioritize loop continuation, defer cycle exits, and suppress respawning
+  // at OR/MIX splits during cycle iteration.
+  const cycleArcs = buildCycleArcs(vertices, edges, out);
 
   // --- DETECT RESET-BOUND SUBSYSTEMS (RBS) ---
   const rbsResetMap = new Map();
@@ -186,8 +259,36 @@ export function generateTraversalTreeFromJSON(
     let progressedThisIteration = false;
 
     for (let nodeX of X) {
-      const outgoingEdges = out.get(nodeX.v) || [];
-      console.log(`[NTT FORWARD] nodeX=${nodeX.id} v=${nodeX.v} outgoingEdges count=${outgoingEdges.length}:`, outgoingEdges.map(e => `${e.from}->${e.to}(C=${e.C},L=${e.L})`).join(", "));
+      const rawOutgoing = out.get(nodeX.v) || [];
+
+      // ── PAE-style cycle-aware ordering & spawn deferral ────────────────────
+      // (1) Sort: unexhausted cycle arcs first, non-cycle next, exhausted last
+      //     so the "main" branch (first non-exhausted) is the loop continuation.
+      // (2) Revisit deferral: if this vertex already appears earlier in this
+      //     branch's path, the OR/MIX split was already resolved on the first
+      //     visit. Spawn ONLY the main branch (no sibling spawns).
+      // (3) Cycle-exit deferral: at a split where one outgoing arc is an ε
+      //     cycle arc with remaining L AND another is a σ non-cycle arc, the σ
+      //     arc is the cycle exit. Don't spawn a sibling for it; the same
+      //     branch will reach it after the loop is L-exhausted (in a later
+      //     iteration of the outer while loop).
+      const outgoingEdges = sortEdgesLoopFirst(rawOutgoing, nodeX.edgeVisits, cycleArcs);
+      const isRevisit = nodeX.path.slice(0, -1).includes(nodeX.v);
+      const hasUnexhaustedCycleEpsilon = outgoingEdges.some((e) => {
+        const ek = `${e.from}->${e.to}`;
+        if (!cycleArcs.has(ek)) return false;
+        const cV = e.C === "" || e.C === "ϵ" ? EPS : e.C;
+        if (cV !== EPS) return false;
+        const trav = nodeX.edgeVisits[ek] || 0;
+        const L = e.L !== undefined ? e.L : 1;
+        return trav < L;
+      });
+      console.log(`[NTT FORWARD] nodeX=${nodeX.id} v=${nodeX.v} outgoingEdges count=${outgoingEdges.length} isRevisit=${isRevisit} hasUnexhaustedCycleEps=${hasUnexhaustedCycleEpsilon}:`, outgoingEdges.map(e => `${e.from}->${e.to}(C=${e.C},L=${e.L})`).join(", "));
+
+      // Track whether the "main" branch (first non-L-exhausted edge) has been
+      // selected. The first edge we accept is the main; subsequent edges are
+      // sibling spawns and subject to revisit/cycle-exit deferral.
+      let mainTaken = false;
 
       for (let edge of outgoingEdges) {
         const yj = edge.to;
@@ -203,6 +304,24 @@ export function generateTraversalTreeFromJSON(
           console.log(`  → SKIP: visits exhausted`);
           continue;
         }
+
+        // PAE cycle-aware spawn rules apply only AFTER the main branch is
+        // taken — i.e., they suppress *additional* sibling branches at this
+        // split. The first available edge always proceeds.
+        if (mainTaken) {
+          if (isRevisit) {
+            console.log(`  → SKIP spawn (revisit of vertex ${nodeX.v}; OR/MIX split already resolved on first visit)`);
+            continue;
+          }
+          const eIsCycle = cycleArcs.has(edgeKey);
+          const cV = edge.C === "" || edge.C === "ϵ" ? EPS : edge.C;
+          const eIsEpsilon = cV === EPS;
+          if (!eIsCycle && !eIsEpsilon && hasUnexhaustedCycleEpsilon) {
+            console.log(`  → SKIP spawn (cycle exit; same branch will take it after loop L-exhausts)`);
+            continue;
+          }
+        }
+        mainTaken = true;
 
         let newEdgeVisits = {
           ...nodeX.edgeVisits,
@@ -370,20 +489,31 @@ export function generateTraversalTreeFromJSON(
                 }
               }
 
-              // Check 2 (AND-joins only): ancestry prefix must be shared.
-              // At an AND-join, nodes that came through DIFFERENT OR-split
-              // branches must not merge — they belong to separate activities.
-              // Nodes from the same branch share the same S prefix (all
-              // elements up to but not including the last arc's C-value).
+              // Check 2 (AND-joins only): source-level OR-choice must match.
+              // At an AND-join, nodes that came through DIFFERENT source-
+              // level OR-split branches must not merge — they belong to
+              // separate activities. We compare ONLY S[1] (the first C-value
+              // taken from the source), not the full S prefix, because two
+              // branches taking the SAME source-level C-value via DIFFERENT
+              // arcs (e.g. arcs 2 and 22 both labelled `b`) — or via paths
+              // with different ε counts — are still the same activity from
+              // the OR-split perspective and are PAE-eligible to synchronize
+              // at this AND-join.
               //
               // MIX-joins are intentionally excluded: the ε and Σ branches
               // always have different S prefixes (they arrived via different
               // OR-split choices), but they are SUPPOSED to merge.
+              //
+              // Note: this only enforces the source-level choice. Nested
+              // OR-splits could in principle over-merge; the explicit
+              // `choices`-conflict check (Check 1) provides partial
+              // coverage there since MIX-AND/MIX-OR splits record their
+              // choice in `choices`.
               const joinType = joinTypes.get(joinV);
               if (joinType === "AND" && pair.length > 1) {
-                const prefixes = pair.map(n => n.S.slice(0, -1).join(","));
-                const first = prefixes[0];
-                if (!prefixes.every(p => p === first)) return false;
+                const firstChoices = pair.map(n => n.S[1]);
+                const first = firstChoices[0];
+                if (!firstChoices.every(c => c === first)) return false;
               }
 
               return true;
@@ -587,7 +717,17 @@ export function generateTraversalTreeFromJSON(
         mergedVisits[edge] = Math.max(mergedVisits[edge] || 0, count);
       }
     }
-    let mergedPath = [...new Set(parents.flatMap((n) => n.path || []))];
+    // Build a chronologically-coherent merged path: union of parents' paths
+    // with the join vertex pinned at the END. The dedup-into-Set above can
+    // reorder entries (insertion order from the first occurrence in the
+    // flatMap), which would put `joinV` in the middle if a later parent's
+    // path is appended after it. That breaks the `isRevisit` check in the
+    // forward loop (it relies on `path.slice(0,-1)` to exclude the current
+    // vertex and look only at earlier entries).
+    let mergedPath = [
+      ...new Set(parents.flatMap((n) => n.path || []).filter((p) => p !== joinV)),
+      joinV,
+    ];
 
     let mergedNode = {
       id: `T_${i++}`,
