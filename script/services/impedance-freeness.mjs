@@ -881,7 +881,17 @@ export function checkCompetingProcesses(activities, simpleModel) {
   // 2. Count unique arc usages per activity and record which process IDs use each arc
   const arcUsageMap = new Map(); // arcUID → { L, usedByProcessIds: number[] }
 
-  for (const activity of activities) {
+  // Nondeterministic activity ordering: shuffle once at the start so all
+  // competing arcs see the same process order. This ensures winner/loser
+  // sets are consistent across arcs (a process cannot win on one arc and
+  // lose on another simply because the per-arc shuffles diverged).
+  const shuffledActivities = [...activities];
+  for (let i = shuffledActivities.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffledActivities[i], shuffledActivities[j]] = [shuffledActivities[j], shuffledActivities[i]];
+  }
+
+  for (const activity of shuffledActivities) {
     const seen = new Set(); // avoid double-counting the same arc within one activity
     for (const arcSet of Object.values(activity.activityProfile)) {
       for (const arcUID of arcSet) {
@@ -904,18 +914,27 @@ export function checkCompetingProcesses(activities, simpleModel) {
   // 4. Assemble the competition log and return
   const competingActivityIds = competingArcs.map(({ usedByProcessIds }) => usedByProcessIds);
 
-  const competitionLog = competingArcs.map(({ arcUID, L, usedByProcessIds }) => ({
-    arcUID,
-    arcL:            L,
-    usedByProcessIds,
-    winnerProcessId: usedByProcessIds[0] ?? null,
-    winnerProcessIds: usedByProcessIds.slice(0, L),
-    loserProcessIds: usedByProcessIds.slice(L),
-    totalTraversals: usedByProcessIds.length,
-    reason:
-      `Arc uid=${arcUID} (L=${L}) used by ${usedByProcessIds.length} activities ` +
-      `[process IDs: ${usedByProcessIds.join(", ")}] — exceeds L-attribute.`,
-  }));
+  // Winners/losers per arc come directly from the shuffled usedByProcessIds
+  // built above. Because activities were shuffled once globally, a process
+  // that lands at position < L on its competing arcs is consistently a winner
+  // across all arcs (and similarly for losers).
+  const competitionLog = competingArcs.map(({ arcUID, L, usedByProcessIds }) => {
+    const winnerIds = usedByProcessIds.slice(0, L);
+    const loserIds  = usedByProcessIds.slice(L);
+    return {
+      arcUID,
+      arcL:            L,
+      usedByProcessIds,
+      winnerProcessId: winnerIds[0] ?? null,
+      winnerProcessIds: winnerIds,
+      loserProcessIds: loserIds,
+      totalTraversals: usedByProcessIds.length,
+      reason:
+        `Arc uid=${arcUID} (L=${L}) used by ${usedByProcessIds.length} activities ` +
+        `[process IDs: ${usedByProcessIds.join(", ")}] — exceeds L-attribute. ` +
+        `Winners: [${winnerIds.join(", ")}]; losers: [${loserIds.join(", ")}].`,
+    };
+  });
 
   return {
     hasCompetition:     competingArcs.length > 0,

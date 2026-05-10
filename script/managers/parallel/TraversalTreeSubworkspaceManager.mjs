@@ -58,29 +58,63 @@ export default class TraversalTreeViewerManager {
   #exportImage() {
     if (!this.#svg || !this.#svg.firstChild) return;
 
+    // Get the tight bounding box of all drawn content
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    // Walk all child elements and union their bounding boxes
+    const allEls = this.#svg.querySelectorAll("text, line, path, rect, circle, g");
+    for (const el of allEls) {
+      try {
+        const bb = el.getBBox();
+        if (bb.width === 0 && bb.height === 0) continue;
+        minX = Math.min(minX, bb.x);
+        minY = Math.min(minY, bb.y);
+        maxX = Math.max(maxX, bb.x + bb.width);
+        maxY = Math.max(maxY, bb.y + bb.height);
+      } catch (_) {}
+    }
+
+    if (!isFinite(minX)) return; // nothing to export
+
+    const PADDING = 32;
+    minX -= PADDING;
+    minY -= PADDING;
+    maxX += PADDING;
+    maxY += PADDING;
+
+    const contentWidth  = maxX - minX;
+    const contentHeight = maxY - minY;
+
+    // Serialize SVG with a viewBox cropped to the content area
+    const originalViewBox = this.#svg.getAttribute("viewBox");
+    this.#svg.setAttribute("viewBox", `${minX} ${minY} ${contentWidth} ${contentHeight}`);
+
     const svgData = new XMLSerializer().serializeToString(this.#svg);
     const processedSvgData = svgData.replace(/currentColor/g, "#000000");
 
+    // Restore original viewBox
+    if (originalViewBox) {
+      this.#svg.setAttribute("viewBox", originalViewBox);
+    } else {
+      this.#svg.removeAttribute("viewBox");
+    }
+
+    const SCALE = 2; // 2× for sharper output
     const canvas = document.createElement("canvas");
+    canvas.width  = contentWidth  * SCALE;
+    canvas.height = contentHeight * SCALE;
+
     const ctx = canvas.getContext("2d");
-
-    const width = parseInt(this.#svg.style.width, 10) || 800;
-    const height = parseInt(this.#svg.style.height, 10) || 600;
-
-    canvas.width = width;
-    canvas.height = height;
-
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.scale(SCALE, SCALE);
 
     const img = new Image();
-    const svgBlob = new Blob([processedSvgData], {
-      type: "image/svg+xml;charset=utf-8",
-    });
+    const svgBlob = new Blob([processedSvgData], { type: "image/svg+xml;charset=utf-8" });
     const url = URL.createObjectURL(svgBlob);
 
     img.onload = () => {
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, 0, 0, contentWidth, contentHeight);
       URL.revokeObjectURL(url);
 
       const imgURI = canvas.toDataURL("image/png");

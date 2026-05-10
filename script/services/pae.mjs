@@ -1352,28 +1352,34 @@ function buildCycleEruMap(cache) {
 }
 
 /**
- * Sorts outgoing arcs so loop arcs (not yet traversed eRU times) come first.
- * This ensures maximal activities fully traverse all loops before exiting.
+ * Sorts outgoing arcs so loop arcs (still L-traversable) come first, then
+ * non-cycle arcs, then L-exhausted cycle arcs. This ensures maximal activities
+ * fully traverse all loop iterations the L-attribute permits before exiting.
+ *
+ * The `eRU` of a cycle arc only specifies the *minimum* iterations required;
+ * the loop may iterate up to L times per arc. For maximal activity extraction
+ * we want the upper bound, so the threshold here is each arc's own L value.
  */
-function sortArcsLoopFirst(outgoingArcUIDs, CTIndicator, cycleEruMap) {
-  const loopArcs    = [];
-  const nonLoopArcs = [];
+function sortArcsLoopFirst(outgoingArcUIDs, CTIndicator, cycleEruMap, arcMap) {
+  const unexhaustedCycleArcs = [];
+  const nonCycleArcs         = [];
+  const exhaustedCycleArcs   = [];
 
   for (const arcUID of outgoingArcUIDs) {
-    const eRU = cycleEruMap.get(arcUID);
-    if (eRU !== undefined) {
-      const traversals = getArcTraversals(arcUID, CTIndicator);
-      if (traversals < eRU) {
-        loopArcs.push(arcUID);
-      } else {
-        nonLoopArcs.push(arcUID);
-      }
+    if (!cycleEruMap.has(arcUID)) {
+      nonCycleArcs.push(arcUID);
+      continue;
+    }
+    const traversals = getArcTraversals(arcUID, CTIndicator);
+    const L = arcMap?.[arcUID]?.L ?? 1;
+    if (traversals < L) {
+      unexhaustedCycleArcs.push(arcUID);
     } else {
-      nonLoopArcs.push(arcUID);
+      exhaustedCycleArcs.push(arcUID);
     }
   }
 
-  return [...loopArcs, ...nonLoopArcs];
+  return [...unexhaustedCycleArcs, ...nonCycleArcs, ...exhaustedCycleArcs];
 }
 
 
@@ -1422,35 +1428,83 @@ export function parallelActivityExtraction(source, sink, cache, simpleModel = nu
           isVertexInRBS(p.currentVertex, piCenter, cache)
         );
         if (!siblingStillInside) {
-          // Before locking, check if a resolution AND/MIX-join is reachable.
+          // Live partners = processes that are still racing (active or pending).
+          // If a live partner has overlapping forward reach with us, the PI
+          // is still "active": this process is mid-race and must merge with
+          // the partner at an AND/MIX-join to be considered parallel
+          // (Def. 3.1.5 condition 2). If no live partner exists with
+          // overlapping reach, the race is OVER — every partner has either
+          // completed or been locked — and this process is the last one
+          // standing. The manuscript's lock-on-PI rule is meant for active
+          // races, not stranded last-runners; allow it to proceed so that
+          // legitimate parallel exits (multiple activities taking the same
+          // outbridge in sequence) are not falsely impeded.
+          const livePartners = processes.filter(p =>
+            p.id !== proc.id &&
+            p.status !== "locked" &&
+            p.status !== "done"
+          );
+
           const myReach = forwardReachableVertices(proc.currentVertex, cache.arcsMatrix);
-          let hasResolution = false;
-          for (const partner of processes) {
-            if (partner.id === proc.id) continue;
-            if (partner.status === "locked" || partner.status === "done") continue;
+
+          // Determine if any live partner shares a forward-reachable vertex
+          // with us. Only such partners are "racing" with us right now.
+          let hasOverlappingLivePartner = false;
+          for (const partner of livePartners) {
             const partnerReach = forwardReachableVertices(partner.currentVertex, cache.arcsMatrix);
             for (const v of myReach) {
-              if (!partnerReach.has(v)) continue;
-              if (v === proc.currentVertex || v === partner.currentVertex) continue;
-              const incoming = [...getIncomingArcs(v, cache.arcsMatrix)];
-              if (incoming.length < 2) continue;
-              const jt = getJoinType(v, cache, processes, null);
-              if (jt === "AND-join" || jt === "MIX-AND-join" || jt === "MIX-OR-join") {
-                hasResolution = true;
+              if (partnerReach.has(v)) {
+                hasOverlappingLivePartner = true;
                 break;
               }
             }
-            if (hasResolution) break;
+            if (hasOverlappingLivePartner) break;
           }
 
-          if (!hasResolution) {
-            lockProcess(proc);
+          if (!hasOverlappingLivePartner) {
+            // No live partner is still racing with us. The PI is no longer
+            // active — clear the marker and continue. This matches the
+            // legitimate sequential-exit case (multiple parallel activities
+            // exiting through the same outbridge in turn).
             console.log(
-              `  PI: Process ${proc.id} LOCKED at vertex ${proc.currentVertex} — ` +
-              `all siblings exited RBS (center ${piCenter}), no resolution join. ` +
-              `Activity interrupted.`
+              `  PI: Process ${proc.id} at vertex ${proc.currentVertex} — ` +
+              `no live partners with overlapping reach in RBS (center ${piCenter}); ` +
+              `clearing PI marker (race already concluded).`
             );
-            continue;
+            proc.interruptedByRBS = null;
+            proc.interruptedByProcessId = null;
+          } else {
+            // Live partner(s) still racing. Per the manuscript: this process
+            // can resume only if a downstream AND/MIX-join exists where it
+            // can merge with the partner. Otherwise — per Def. 3.1.5
+            // condition 2 and Algorithm 2 line 100 — it is LOCKED.
+            let hasResolution = false;
+            for (const partner of livePartners) {
+              const partnerReach = forwardReachableVertices(partner.currentVertex, cache.arcsMatrix);
+              for (const v of myReach) {
+                if (!partnerReach.has(v)) continue;
+                if (v === proc.currentVertex || v === partner.currentVertex) continue;
+                const incoming = [...getIncomingArcs(v, cache.arcsMatrix)];
+                if (incoming.length < 2) continue;
+                const jt = getJoinType(v, cache, processes, null);
+                if (jt === "AND-join" || jt === "MIX-AND-join" || jt === "MIX-OR-join") {
+                  hasResolution = true;
+                  break;
+                }
+              }
+              if (hasResolution) break;
+            }
+
+            if (!hasResolution) {
+              lockProcess(proc);
+              console.log(
+                `  PI: Process ${proc.id} LOCKED at vertex ${proc.currentVertex} — ` +
+                `interrupted by RBS (center ${piCenter}); a live partner is still ` +
+                `racing but no AND/MIX-join resolution exists. Activity interrupted ` +
+                `(manuscript line 100, Def. 3.1.5 condition 2).`
+              );
+              continue;
+            }
           }
         }
       }
@@ -1475,10 +1529,22 @@ export function parallelActivityExtraction(source, sink, cache, simpleModel = nu
       // for this process but may still be eligible for OTHER processes
       // (separate L budget per parallel activity) are simply removed from
       // THIS process's choice set here — they are not a global block.
-      const outgoing = allOutgoing.filter((uid) => {
+      const filteredOutgoing = allOutgoing.filter((uid) => {
         const a = arcMap[uid];
         return getArcTraversals(uid, proc.states.CTIndicator) < a.L;
       });
+
+      // Sort so loop-continuation arcs (cycle arcs with remaining L capacity)
+      // come first, then non-cycle arcs, then exhausted cycle arcs. This is
+      // critical for revisits: when a process loops back to a vertex with
+      // both a cycle arc and a non-cycle exit, we want the cycle arc to be
+      // outgoing[0] so the process continues iterating.
+      const outgoing = sortArcsLoopFirst(
+        filteredOutgoing,
+        proc.states.CTIndicator,
+        cycleEruMap,
+        arcMap,
+      );
 
       if (outgoing.length === 0) {
         lockProcess(proc);
@@ -1488,7 +1554,39 @@ export function parallelActivityExtraction(source, sink, cache, simpleModel = nu
       // Determine which arc to assess
       if (proc.nextArcUID === null) {
         if (outgoing.length > 1) {
+          // ── Cycle-aware spawn rules ─────────────────────────────────────────
+          // (a) Revisit: if this vertex already appears earlier in proc.path,
+          //     this process is iterating a cycle. The OR/MIX split was already
+          //     resolved during the first visit (any sibling activities were
+          //     spawned then). Do not respawn — just continue with outgoing[0]
+          //     (sortArcsLoopFirst puts the cycle continuation arc first).
+          //
+          // (b) Cycle-exit deferral: at a MIX split where one outgoing arc is
+          //     an ε cycle arc with unexhausted eRU AND another is a σ arc that
+          //     leaves the cycle, the σ arc is the cycle exit. The same process
+          //     must iterate the loop and take the exit itself — do not spawn a
+          //     sibling for the exit.
+          const isRevisit = proc.states.path.slice(0, -1).includes(proc.currentVertex);
+          const hasUnexhaustedCycleEpsilon = outgoing.some((uid) => {
+            const eRU = cycleEruMap.get(uid);
+            if (eRU === undefined) return false;
+            if (!isEpsilon(arcMap[uid])) return false;
+            return getArcTraversals(uid, proc.states.CTIndicator) < eRU;
+          });
+
           for (let i = 1; i < outgoing.length; i++) {
+            if (isRevisit) {
+              console.log(`  Process ${proc.id} skipped spawn for arc ${outgoing[i]} (revisit of vertex ${proc.currentVertex})`);
+              continue;
+            }
+            // Defer the cycle-exit σ arc to the same process after the loop
+            const candIsCycle = cycleEruMap.has(outgoing[i]);
+            const candIsEpsilon = isEpsilon(arcMap[outgoing[i]]);
+            if (!candIsCycle && !candIsEpsilon && hasUnexhaustedCycleEpsilon) {
+              console.log(`  Process ${proc.id} deferred spawn for arc ${outgoing[i]} (cycle exit; same process will take it after loop)`);
+              continue;
+            }
+
             // A child is a duplicate only if it has the same path history as this
             // process — two processes that arrived at the same vertex via different
             // routes must each independently spawn their own split children.
