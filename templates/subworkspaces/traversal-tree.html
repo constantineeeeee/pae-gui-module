@@ -25,10 +25,56 @@
           <button data-tt-action="close">Close</button>
         </div>
       </header>
-      <main style="height: calc(100% - 58px)">
-        <section class="drawing" style="height: 100%; overflow: auto;">
+      <main style="height: calc(100% - 58px); position: relative;">
+        <section
+          class="drawing"
+          data-tt-drawing
+          style="height: 100%; overflow: auto;"
+        >
           <svg data-tt-svg style="min-width: 100%; min-height: 100%; display: block;"></svg>
         </section>
+
+        <div
+          class="tt-zoom-toolbar"
+          style="
+            position: absolute;
+            right: 12px;
+            bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 6px;
+            background: rgba(255, 255, 255, 0.94);
+            border: 1px solid #c7c7c7;
+            border-radius: 6px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+            font-size: 12px;
+            user-select: none;
+          "
+        >
+          <button
+            data-tt-action="zoomOut"
+            title="Zoom out (Ctrl/Cmd + -)"
+            style="border:none;background:transparent;cursor:pointer;padding:4px 8px;font-size:14px;line-height:1;border-radius:4px;"
+          >−</button>
+          <span
+            data-tt-zoom-label
+            title="Click to reset to 100%"
+            data-tt-action="zoomReset"
+            style="min-width:46px;text-align:center;cursor:pointer;font-variant-numeric:tabular-nums;"
+          >100%</span>
+          <button
+            data-tt-action="zoomIn"
+            title="Zoom in (Ctrl/Cmd + =)"
+            style="border:none;background:transparent;cursor:pointer;padding:4px 8px;font-size:14px;line-height:1;border-radius:4px;"
+          >+</button>
+          <span style="width:1px;height:18px;background:#c7c7c7;margin:0 2px;"></span>
+          <button
+            data-tt-action="zoomFit"
+            title="Fit tree to screen"
+            style="border:none;background:transparent;cursor:pointer;padding:4px 8px;font-size:11px;line-height:1;border-radius:4px;"
+          >Fit</button>
+        </div>
       </main>
 
     <aside
@@ -44,11 +90,6 @@
           <div class="tt-results-block">
             <h4>Generated Branches (Paths)</h4>
             <div data-tt-parallel></div>
-          </div>
-
-          <div class="tt-results-block">
-            <!-- <h4>Non-parallel Branches</h4> -->
-            <div data-tt-nonparallel></div>
           </div>
         </div>
 

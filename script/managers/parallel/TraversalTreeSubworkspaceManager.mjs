@@ -19,6 +19,15 @@ export default class TraversalTreeViewerManager {
   #root;
   #groupColors = null;
   #pathColorIdx = [];
+  /** Currently highlighted maximalPath index, or null if none. */
+  #highlightedPathIdx = null;
+  /** Zoom state for the traversal-tree canvas. */
+  #zoom = 1;
+  #zoomMin = 0.25;
+  #zoomMax = 4;
+  /** Base (un-zoomed) SVG dimensions, set by #renderTree's resize step. */
+  #baseW = 0;
+  #baseH = 0;
 
   constructor(context, visualModelSnapshot, groupColors = null) {
     this.context = context;
@@ -52,6 +61,34 @@ export default class TraversalTreeViewerManager {
     root
       .querySelector('[data-tt-action="exportTT"]')
       ?.addEventListener("click", () => this.#exportImage());
+
+    // ── Zoom controls ─────────────────────────────────────────────────────
+    root
+      .querySelector('[data-tt-action="zoomIn"]')
+      ?.addEventListener("click", () => this.#zoomBy(1.2));
+    root
+      .querySelector('[data-tt-action="zoomOut"]')
+      ?.addEventListener("click", () => this.#zoomBy(1 / 1.2));
+    root
+      .querySelector('[data-tt-action="zoomReset"]')
+      ?.addEventListener("click", () => this.#zoomReset());
+    root
+      .querySelector('[data-tt-action="zoomFit"]')
+      ?.addEventListener("click", () => this.#zoomFit());
+
+    // Ctrl/Cmd + wheel inside the drawing area → cursor-anchored zoom.
+    // Plain wheel keeps the browser's default scroll behaviour.
+    const drawing = root.querySelector("[data-tt-drawing]");
+    drawing?.addEventListener(
+      "wheel",
+      (ev) => {
+        if (!(ev.ctrlKey || ev.metaKey)) return;
+        ev.preventDefault();
+        const factor = ev.deltaY < 0 ? 1.1 : 1 / 1.1;
+        this.#zoomBy(factor, { clientX: ev.clientX, clientY: ev.clientY });
+      },
+      { passive: false },
+    );
 
     this.#runAndRender();
   }
@@ -297,6 +334,13 @@ export default class TraversalTreeViewerManager {
     line.setAttribute("stroke-width", strokeWidth);
     line.setAttribute("opacity", opacity);
     line.setAttribute("marker-end", `url(#${markerId})`);
+    // Tag the edge with the maximalPath index it belongs to (when known)
+    // so the sidebar's row-click handler can dim/emphasize all edges of a
+    // given path in one pass.
+    if (opts.pathIdx !== undefined && opts.pathIdx !== null) {
+      line.setAttribute("data-tt-path", String(opts.pathIdx));
+      line.classList.add("tt-path-edge");
+    }
     edgeG.appendChild(line);
 
     if (label !== undefined && label !== null) {
@@ -893,7 +937,7 @@ export default class TraversalTreeViewerManager {
             to.xIn - 2, to.yMid,
             label,
             { stroke: PATH_COLORS[ci], strokeWidth: "2.4", opacity: "0.95",
-              markerId: `tt-arrow-${ci}` },
+              markerId: `tt-arrow-${ci}`, pathIdx: pathIndices[0] },
           );
         } else {
           // Shared edge across multiple paths — draw stacked offset lines,
@@ -910,7 +954,7 @@ export default class TraversalTreeViewerManager {
               to.xIn - 2, to.yMid + offset,
               idx === 0 ? label : null, // only label once
               { stroke: PATH_COLORS[ci], strokeWidth: "2.0", opacity: "0.85",
-                markerId: `tt-arrow-${ci}` },
+                markerId: `tt-arrow-${ci}`, pathIdx: pi },
             );
           });
         }
@@ -929,8 +973,135 @@ export default class TraversalTreeViewerManager {
     const clientWidth = this.#root.clientWidth || 800;
     const clientHeight = this.#root.clientHeight || 600;
 
-    this.#svg.style.width = `${Math.max(maxRight, clientWidth)}px`;
-    this.#svg.style.height = `${Math.max(maxBottom, clientHeight)}px`;
+    // Record the base (un-zoomed) canvas size, then let #applyZoom() set the
+    // displayed width/height. Using viewBox + a scaled width/height lets the
+    // browser cleanly rescale all SVG primitives without us touching every
+    // node/edge coordinate; the scroll container then sees the scaled size.
+    this.#baseW = Math.max(maxRight, clientWidth);
+    this.#baseH = Math.max(maxBottom, clientHeight);
+    this.#svg.setAttribute("viewBox", `0 0 ${this.#baseW} ${this.#baseH}`);
+    this.#svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+    this.#applyZoom();
+  }
+
+  // ─── Zoom ────────────────────────────────────────────────────────────────
+
+  /** Resize the displayed SVG according to current #zoom. */
+  #applyZoom() {
+    if (!this.#svg || !this.#baseW || !this.#baseH) return;
+    this.#svg.style.width  = `${this.#baseW * this.#zoom}px`;
+    this.#svg.style.height = `${this.#baseH * this.#zoom}px`;
+    const label = this.#root?.querySelector("[data-tt-zoom-label]");
+    if (label) label.textContent = `${Math.round(this.#zoom * 100)}%`;
+  }
+
+  /**
+   * Set zoom to a specific value, clamped. If `pivot` is provided as
+   * `{ clientX, clientY }`, the point under the cursor stays fixed
+   * (cursor-anchored zoom — like a typical map / IDE zoom).
+   */
+  #setZoom(z, pivot = null) {
+    const clamped = Math.min(this.#zoomMax, Math.max(this.#zoomMin, z));
+    if (clamped === this.#zoom) return;
+
+    const scrollHost = this.#root?.querySelector("[data-tt-drawing]");
+    let anchorBefore = null;
+    if (scrollHost && pivot) {
+      const rect = scrollHost.getBoundingClientRect();
+      anchorBefore = {
+        x: scrollHost.scrollLeft + (pivot.clientX - rect.left),
+        y: scrollHost.scrollTop  + (pivot.clientY - rect.top),
+        cx: pivot.clientX - rect.left,
+        cy: pivot.clientY - rect.top,
+      };
+    }
+
+    const ratio = clamped / this.#zoom;
+    this.#zoom = clamped;
+    this.#applyZoom();
+
+    if (scrollHost && anchorBefore) {
+      scrollHost.scrollLeft = anchorBefore.x * ratio - anchorBefore.cx;
+      scrollHost.scrollTop  = anchorBefore.y * ratio - anchorBefore.cy;
+    }
+  }
+
+  #zoomBy(factor, pivot = null) {
+    this.#setZoom(this.#zoom * factor, pivot);
+  }
+
+  /** Reset zoom to 100%. */
+  #zoomReset() {
+    this.#setZoom(1);
+  }
+
+  /** Fit the entire tree into the visible drawing area. */
+  #zoomFit() {
+    const scrollHost = this.#root?.querySelector("[data-tt-drawing]");
+    if (!scrollHost || !this.#baseW || !this.#baseH) return;
+    const pad = 24;
+    const fitW = (scrollHost.clientWidth  - pad) / this.#baseW;
+    const fitH = (scrollHost.clientHeight - pad) / this.#baseH;
+    this.#setZoom(Math.min(fitW, fitH));
+  }
+
+  // ─── Path highlighting ───────────────────────────────────────────────────
+  //
+  // Apply the current `#highlightedPathIdx` selection to the SVG: when set,
+  // edges tagged with `data-tt-path === idx` keep full strength while every
+  // OTHER path-tagged edge is dimmed; when null, all edges return to their
+  // rendered-baseline opacity (the values written by #drawEdge).
+  //
+  // We don't rebuild the tree on toggle — we just adjust opacity in place.
+  #applyPathHighlight() {
+    if (!this.#svg) return;
+    const idx = this.#highlightedPathIdx;
+    const edges = this.#svg.querySelectorAll(".tt-path-edge");
+    edges.forEach((el) => {
+      if (idx === null) {
+        // Reset to the rendered-baseline opacity: 0.95 for solo edges, 0.85
+        // for stacked. We can't tell the two apart cheaply here, so use a
+        // single readable value — visual difference is negligible.
+        el.style.removeProperty("opacity");
+        el.removeAttribute("data-tt-dimmed");
+      } else {
+        const pi = Number(el.getAttribute("data-tt-path"));
+        if (pi === idx) {
+          el.style.setProperty("opacity", "1");
+          el.removeAttribute("data-tt-dimmed");
+        } else {
+          el.style.setProperty("opacity", "0.12");
+          el.setAttribute("data-tt-dimmed", "1");
+        }
+      }
+    });
+
+    // Reflect the active row in the sidebar.
+    const rows = this.#root.querySelectorAll("[data-tt-path-row]");
+    rows.forEach((r) => {
+      const pi = Number(r.getAttribute("data-tt-path-row"));
+      const action = r.querySelector(`[data-tt-path-action="${pi}"]`);
+      const isActive = idx !== null && pi === idx;
+      if (isActive) {
+        r.style.background = "rgba(58,129,222,0.15)";
+        r.style.outline = "1px solid rgba(58,129,222,0.5)";
+        if (action) {
+          action.style.background = "rgba(58,129,222,0.25)";
+          action.style.borderColor = "rgba(58,129,222,0.7)";
+          action.style.color = "rgba(0,0,0,0.85)";
+          action.innerHTML = '<i class="fas fa-eye" style="font-size:9px">';
+        }
+      } else {
+        r.style.background = "";
+        r.style.outline = "";
+        if (action) {
+          action.style.background = "rgba(0,0,0,0.06)";
+          action.style.borderColor = "rgba(0,0,0,0.15)";
+          action.style.color = "rgba(0,0,0,0.65)";
+          action.innerHTML = '<i class="fas fa-eye" style="font-size:9px">';
+        }
+      }
+    });
   }
 
   // ─── Sidebar / metadata panel ─────────────────────────────────────────────
@@ -939,6 +1110,9 @@ export default class TraversalTreeViewerManager {
     const parallelHost = this.#root.querySelector("[data-tt-parallel]");
     if (!parallelHost) return;
 
+    // A re-render means the SVG has been redrawn from scratch; the previous
+    // highlight selection no longer matches any element.
+    this.#highlightedPathIdx = null;
     parallelHost.innerHTML = "";
 
     const fmtS = (S) => {
@@ -958,32 +1132,131 @@ export default class TraversalTreeViewerManager {
       ? ProcessColorRegistry.getAllColors()
       : ["#3a81de","#4caf50","#ff9800","#9c27b0","#e91e63","#00bcd4","#795548","#607d8b"];
 
+      // ── Hint banner: tells users the rows are interactive ──────────────
+      const hint = document.createElement("div");
+      hint.style.cssText =
+        "padding:6px 8px;margin-bottom:8px;border-radius:4px;" +
+        "background:rgba(58,129,222,0.10);border:1px solid rgba(58,129,222,0.35);" +
+        "font-size:11px;color:rgba(0,0,0,0.75);display:flex;align-items:center;gap:6px;";
+      hint.innerHTML =
+        '<i class="fas fa-hand-pointer" style="opacity:0.8"></i>' +
+        '<span>Click a path to highlight it in the tree. Click again to clear.</span>';
+      parallelHost.appendChild(hint);
+
       const list = document.createElement("div");
       list.style.cssText =
-        "display:flex;flex-direction:column;gap:6px;font-size:12px;";
+        "display:flex;flex-direction:column;gap:10px;font-size:12px;";
 
-      res.maximalPaths.forEach((b, pathIndex) => {
-        const ci = this.#pathColorIdx[pathIndex] ?? (pathIndex % PATH_COLORS.length);
-        const color = PATH_COLORS[ci];
+      // ── Group paths by completion time ───────────────────────────────
+      // Paths that reach their leaf at the same `time` are candidates for
+      // parallel execution (they finish in lockstep). Grouping makes this
+      // visible at a glance.
+      const buckets = new Map(); // time → [{ leaf, pathIndex }]
+      res.maximalPaths.forEach((leaf, pathIndex) => {
+        const t = leaf.time ?? 0;
+        if (!buckets.has(t)) buckets.set(t, []);
+        buckets.get(t).push({ leaf, pathIndex });
+      });
+      const sortedTimes = [...buckets.keys()].sort((a, b) => a - b);
 
-        const row = document.createElement("div");
-        row.style.cssText =
-          "padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.1);" +
-          "display:flex;align-items:center;gap:8px;";
+      sortedTimes.forEach((t) => {
+        const bucket = buckets.get(t);
+        const isParallel = bucket.length > 1;
 
-        // Color swatch matching the path's edges in the tree
-        const swatch = document.createElement("span");
-        swatch.style.cssText =
-          `display:inline-block;width:12px;height:12px;border-radius:3px;` +
-          `background:${color};flex-shrink:0;`;
-        row.appendChild(swatch);
+        // Group container with a left accent bar
+        const groupEl = document.createElement("div");
+        groupEl.style.cssText =
+          "display:flex;flex-direction:column;gap:4px;" +
+          `border-left:3px solid ${isParallel ? "#4caf50" : "rgba(255,255,255,0.15)"};` +
+          "padding-left:8px;";
 
-        const labelEl = document.createElement("span");
-        labelEl.textContent = `Path ${pathIndex + 1}: ${b.v}  —  ${fmtS(b.S)}`;
-        labelEl.style.cssText = "flex:1;";
-        row.appendChild(labelEl);
+        // Group header
+        const header = document.createElement("div");
+        header.style.cssText =
+          "font-weight:600;font-size:11px;letter-spacing:0.3px;" +
+          "text-transform:uppercase;color:rgba(255,255,255,0.75);" +
+          "padding:2px 0;";
+        header.textContent = isParallel
+          ? `t = ${t}  •  ${bucket.length} paths (potentially parallel)`
+          : `t = ${t}  •  1 path`;
+        groupEl.appendChild(header);
 
-        list.appendChild(row);
+        bucket.forEach(({ leaf, pathIndex }) => {
+          const ci = this.#pathColorIdx[pathIndex] ?? (pathIndex % PATH_COLORS.length);
+          const color = PATH_COLORS[ci];
+
+          const row = document.createElement("div");
+          row.setAttribute("data-tt-path-row", String(pathIndex));
+          row.setAttribute("role", "button");
+          row.setAttribute("tabindex", "0");
+          row.title = "Click to highlight this path in the tree (click again to clear).";
+          // Baseline (idle) styles — kept on a custom property so hover/active
+          // handlers below can revert without recomputing the whole string.
+          row.style.cssText =
+            "padding:5px 8px;border-bottom:1px solid rgba(255,255,255,0.1);" +
+            "display:flex;align-items:center;gap:8px;cursor:pointer;" +
+            "border-radius:4px;transition:background 0.12s ease, transform 0.05s ease;" +
+            "user-select:none;";
+
+          // Color swatch matching the path's edges in the tree
+          const swatch = document.createElement("span");
+          swatch.style.cssText =
+            `display:inline-block;width:12px;height:12px;border-radius:3px;` +
+            `background:${color};flex-shrink:0;`;
+          row.appendChild(swatch);
+
+          const labelEl = document.createElement("span");
+          labelEl.textContent = `Path ${pathIndex + 1}: ${leaf.v}  —  ${fmtS(leaf.S)}`;
+          labelEl.style.cssText = "flex:1;";
+          row.appendChild(labelEl);
+
+          // Trailing action chip — communicates the row is interactive and
+          // shows the current toggle state. Updated by #applyPathHighlight.
+          const action = document.createElement("span");
+          action.setAttribute("data-tt-path-action", String(pathIndex));
+          action.style.cssText =
+            "display:inline-flex;align-items:center;gap:4px;flex-shrink:0;" +
+            "font-size:10px;font-weight:600;letter-spacing:0.3px;" +
+            "padding:2px 6px;border-radius:10px;" +
+            "background:rgba(0,0,0,0.06);border:1px solid rgba(0,0,0,0.15);" +
+            "color:rgba(0,0,0,0.65);text-transform:uppercase;";
+          action.innerHTML = '<i class="fas fa-eye" style="font-size:9px"></i><span></span>';
+          row.appendChild(action);
+
+          // Hover affordance (inline styles bypass :hover, so we wire it).
+          row.addEventListener("mouseenter", () => {
+            if (this.#highlightedPathIdx === pathIndex) return;
+            row.style.background = "rgba(0,0,0,0.05)";
+          });
+          row.addEventListener("mouseleave", () => {
+            if (this.#highlightedPathIdx === pathIndex) return;
+            row.style.background = "";
+          });
+          row.addEventListener("mousedown", () => {
+            row.style.transform = "scale(0.985)";
+          });
+          row.addEventListener("mouseup", () => {
+            row.style.transform = "";
+          });
+
+          // Click → toggle this path's full-tree highlight
+          const toggle = () => {
+            this.#highlightedPathIdx =
+              this.#highlightedPathIdx === pathIndex ? null : pathIndex;
+            this.#applyPathHighlight();
+          };
+          row.addEventListener("click", toggle);
+          row.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") {
+              ev.preventDefault();
+              toggle();
+            }
+          });
+
+          groupEl.appendChild(row);
+        });
+
+        list.appendChild(groupEl);
       });
 
       parallelHost.appendChild(list);
