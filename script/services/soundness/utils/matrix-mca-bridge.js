@@ -448,8 +448,38 @@ function contract(x, y, RV_adj, RV_C) {
 /**
  * Exhaustive recursive enumeration of all valid contraction paths.
  * Implements Algorithm 1 from Amancio's MCA.
+ *
+ * State memoisation:
+ *   For graphs with multiple parallel branches converging on a single
+ *   join, the number of valid interleavings of contractions is multinomial
+ *   in the branch lengths (e.g. 13!/(4!·3!·3!·3!) ≈ 1.2M for four chains).
+ *   Many of those orderings reach the same intermediate state — same set
+ *   of absorbed atomic vertices in the current composite and same
+ *   pathHead — from which the recursive suffix is deterministic.
+ *   The downstream `extractMASviaMatrixMCA` dedupes the final MinCS by
+ *   atomic-vertex set, so all orderings reaching a given state produce
+ *   the same unique MinCS contributions; only one needs to be explored.
+ *
+ *   `seenStates` is shared across the whole recursion (constructed once
+ *   per `generateContractionPaths` call) and keyed by the SORTED set of
+ *   atomic vertices absorbed into the current composite.
+ *
+ *   The composite vertex's NAME (e.g. "x1∧x7∧x8" vs "x1∧x8∧x7") encodes
+ *   the contraction order, so two paths reaching the same atomic set get
+ *   different composite names. We deliberately key on atoms only — the
+ *   composite is just a renaming, and `reachable(pathHead, y, RV_adj)`
+ *   gives the same answer regardless of which name the composite carries
+ *   because the aggregated edge structure is identical.
+ *
+ *   Likewise pathHead is excluded from the key: after the very first
+ *   contraction, `updatePathHead` always promotes it to the current
+ *   composite, so pathHead is a pure function of the absorbed atoms.
+ *
+ *   On a repeat visit we return [] — terminating that branch immediately
+ *   without losing any unique MinCS downstream (the downstream MinCS
+ *   dedup keys on `atomicVertices`, which is exactly this atom set).
  */
-function tryContractAll(RV_adj, RV_C, x, sink, P, steps, pathHead, atomMap) {
+function tryContractAll(RV_adj, RV_C, x, sink, P, steps, pathHead, atomMap, seenStates) {
     const results = [];
 
     // Termination: sink has been absorbed
@@ -457,6 +487,13 @@ function tryContractAll(RV_adj, RV_C, x, sink, P, steps, pathHead, atomMap) {
         results.push({ P: [...P], steps: [...steps] });
         return results;
     }
+
+    // Memoisation: skip if we have already explored from this absorbed set.
+    const stateKey = (atomMap[x] ?? [x]).slice().sort().join(',');
+    if (seenStates.has(stateKey)) {
+        return results;
+    }
+    seenStates.add(stateKey);
 
     // Candidate neighbors of x
     const rawNeighbors = matrixNeighbors(x, RV_adj);
@@ -509,9 +546,12 @@ function tryContractAll(RV_adj, RV_C, x, sink, P, steps, pathHead, atomMap) {
 
         // Recurse
         const subResults = tryContractAll(
-            newAdj, newC, z, sink, PCopy, stepsCopy, newPathHead, atomMapCopy
+            newAdj, newC, z, sink, PCopy, stepsCopy, newPathHead, atomMapCopy, seenStates
         );
-        results.push(...subResults);
+        // Use a loop instead of `results.push(...subResults)` — the spread
+        // form passes each element as a separate argument, and V8 throws
+        // "Maximum call stack size exceeded" when the count exceeds ~65535.
+        for (const r of subResults) results.push(r);
     }
 
     return results;
@@ -536,11 +576,13 @@ function generateContractionPaths(flatRDLT) {
     const atomMap = {};
     flatRDLT.vertices.forEach(v => { atomMap[v.vuid] = [v.vuid]; });
 
+    // Shared memo set — see `tryContractAll` doc-comment for rationale.
+    const seenStates = new Set();
     const results = tryContractAll(
-        RV_adj, RV_C, source, sink, [source], [], source, atomMap
+        RV_adj, RV_C, source, sink, [source], [], source, atomMap, seenStates
     );
 
-    console.log(`[MatrixMCA] Phase 1: Found ${results.length} contraction path(s)`);
+    console.log(`[MatrixMCA] Phase 1: Found ${results.length} contraction path(s) (memoised states: ${seenStates.size})`);
 
     return results.map(r => {
         const finalMerged = r.P[r.P.length - 1];
